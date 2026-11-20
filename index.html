@@ -134,6 +134,20 @@
   .cbtns .end{background:var(--err);border-color:var(--err);color:#fff}
   .chint{font-size:12px;color:var(--muted)}
 
+  /* التكلفة والتنبيهات */
+  .costline{font-size:11px;color:var(--muted);margin-top:6px;direction:rtl}
+  #chatCost{font-size:12px;color:var(--muted);white-space:nowrap;direction:ltr}
+  .banner{display:none;margin:6px 14px 0;padding:10px 12px;border:1px solid var(--line);border-radius:14px;
+    background:var(--panel);align-items:center;gap:10px;font-size:14px}
+  .banner.show{display:flex}
+  .banner .t{flex:1}
+  .banner.warn{border-color:#8a6d1f;background:#2b2516}
+  .banner.over{border-color:#8a2b2b;background:#2e1a1a}
+  .banner button{padding:7px 12px;border-radius:10px;border:1px solid var(--line);background:none;cursor:pointer}
+  .banner button.go{background:var(--claude);border-color:var(--claude);color:#1a1a1a;font-weight:600}
+  .costbox{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:13px;line-height:1.8}
+  .costbox b{font-size:15px}
+
   /* نافذة الإعدادات */
   dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:18px;
     width:min(94vw,460px);max-height:90dvh;padding:18px}
@@ -154,6 +168,7 @@
 <header>
   <button class="icon" id="openDrawer" title="المحادثات">☰</button>
   <h1 id="chatTitle">مجلس الثلاثة</h1>
+  <span id="chatCost" title="تكلفة هذه المحادثة (تقديرية)"></span>
   <select id="mode" aria-label="طريقة الرد">
     <option value="both">يردّان مرة</option>
     <option value="debate">نقاش + خلاصة</option>
@@ -201,6 +216,9 @@
   <div class="chint">اضغط الدائرة لمقاطعة الكلام والتحدث</div>
 </div>
 
+<div id="spendBanner" class="banner"><span class="t" id="spendText"></span><button id="spendX">✕</button></div>
+<div id="backupBanner" class="banner"><span class="t" id="backupText">💾 مرّ أسبوع بدون نسخة احتياطية لمحادثاتك</span>
+  <button class="go" id="backupNow">احفظ النسخة</button><button id="backupX">✕</button></div>
 <div id="bioBanner" style="display:none;margin:6px 14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);align-items:center;gap:10px">
   <span style="flex:1;font-size:14px">👆 فعّل الدخول بالبصمة بدل كلمة السر</span>
   <button id="bioYes" style="padding:8px 14px;border-radius:10px;border:none;background:var(--claude);color:#1a1a1a;font-weight:600;cursor:pointer">تفعيل</button>
@@ -258,6 +276,11 @@
     <button class="btn primary" id="saveSettings">حفظ</button>
     <button class="btn" id="closeSettings">إغلاق</button>
   </div>
+  <label>💰 التكلفة هذا الشهر</label>
+  <div class="costbox" id="costBox"></div>
+  <label>حدّ الصرف الشهري بالدولار (0 = بدون حد)</label>
+  <input type="number" id="monthLimit" min="0" step="0.5">
+  <div class="hint">الأرقام تقديرية والتسعيرة من OpenRouter. تكلفة Gemini والصوت عبر OpenRouter فعلية، وتكلفة Claude تقدير (توكنز × التسعيرة). قارنها بلوحتي OpenRouter وClaude Console.</div>
   <label>النسخ الاحتياطي (ملف مشفر بكلمة سر تختارها)</label>
   <div class="btns" style="margin-top:4px">
     <button class="btn" id="backupBtn">⬇️ حفظ نسخة احتياطية</button>
@@ -345,7 +368,7 @@ async function openVault(uid, dek){
   }
   await flushVault();
 }
-const DEFAULTS = { ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
+const DEFAULTS = { monthLimit:0, ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
   geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
 let S = Object.assign({}, DEFAULTS);
 /* ===== المحادثات المحفوظة بأسماء (مثل Claude) ===== */
@@ -549,6 +572,46 @@ async function readSSE(r, onData){
   }
 }
 
+/* ===== عدّاد التكلفة ===== */
+let lastUsage = null;                     // استهلاك آخر طلب: { inTok, outTok, usd, est, free }
+const monthKey = () => new Date().toISOString().slice(0, 7);
+async function loadPrices(force){
+  const c = store.get('majlis_prices', null);
+  if (c && !force && Date.now() - c.t < 24*3600*1000) return c.p;
+  try{
+    const r = await fetch('https://openrouter.ai/api/v1/models');
+    const d = await r.json(); const p = {};
+    for (const m of d.data || []) if (m.pricing) p[m.id] = { i: +m.pricing.prompt || 0, o: +m.pricing.completion || 0 };
+    if (Object.keys(p).length) store.set('majlis_prices', { t: Date.now(), p });
+    return p;
+  }catch(e){ return c ? c.p : {}; }
+}
+/* يجد سعر النموذج في قائمة OpenRouter، مثلاً claude-sonnet-5-5 ← anthropic/claude-sonnet-5.5 */
+function priceFor(modelId){
+  const p = (store.get('majlis_prices', null) || {}).p || {};
+  if (p[modelId]) return p[modelId];
+  const norm = x => x.toLowerCase().replace(/^[a-z0-9-]+\//, '').replace(/[.\-_]/g, '');
+  const n = norm(modelId);
+  for (const id in p) if (norm(id) === n) return p[id];
+  return null;
+}
+function estimateUsd(modelId, inTok, outTok){
+  const pr = priceFor(modelId);
+  return pr ? (inTok || 0) * pr.i + (outTok || 0) * pr.o : null;
+}
+function addSpend(kind, usd){
+  if (!usd || !isFinite(usd)) return;
+  const all = store.get('majlis_spend', {}), k = monthKey();
+  const m = all[k] || (all[k] = { claude:0, gemini:0, voice:0 });
+  m[kind] = (m[kind] || 0) + usd;
+  store.set('majlis_spend', all);
+  checkLimit(); updateCostUI();
+}
+function monthParts(){ return (store.get('majlis_spend', {}) || {})[monthKey()] || { claude:0, gemini:0, voice:0 }; }
+function monthSpend(){ const m = monthParts(); return (m.claude || 0) + (m.gemini || 0) + (m.voice || 0); }
+const fmtUsd = v => '$' + (v < 0.01 ? v.toFixed(4) : v < 1 ? v.toFixed(3) : v.toFixed(2));
+const fmtTok = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+
 async function callClaude(turns, system, onDelta){
   if (!S.claudeKey) throw new Error('ضع مفتاح Claude في الإعدادات ⚙️');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -567,14 +630,21 @@ async function callClaude(turns, system, onDelta){
     const d = await r.json().catch(() => ({}));
     throw new Error('Claude: ' + (d.error && d.error.message || r.status));
   }
-  let text = '';
+  let text = '', inTok = 0, outTok = 0;
   await readSSE(r, ev => {
+    if (ev.type === 'message_start' && ev.message && ev.message.usage){
+      const u = ev.message.usage;
+      inTok = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+    }
+    if (ev.type === 'message_delta' && ev.usage) outTok = ev.usage.output_tokens || outTok;
     if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta'){
       text += ev.delta.text; if (onDelta) onDelta(text);
     } else if (ev.type === 'error'){
       const e = new Error('Claude: ' + (ev.error && ev.error.message || 'خطأ')); e.isApiError = true; throw e;
     }
   });
+  // Anthropic ترجّع عدد التوكنز الفعلي، والسعر من قائمة OpenRouter (تقدير)
+  lastUsage = { inTok, outTok, usd: estimateUsd('anthropic/' + S.claudeModel, inTok, outTok), est: true };
   return text.trim();
 }
 
@@ -623,6 +693,8 @@ async function geminiRequest(body, withConfig){
       if (aborter) aborter.signal.removeEventListener('abort', onStop);
     }
     if (r.ok){
+      const um = d.usageMetadata || {};
+      lastUsage = { inTok: um.promptTokenCount || 0, outTok: um.candidatesTokenCount || 0, usd: 0, free: true };
       const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
       lastModel = model;
       store.set('majlis_gemini_ok', { m:model, t:Date.now() });
@@ -643,7 +715,7 @@ async function callOpenRouter(turns, system, onDelta){
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
-    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 4000, reasoning:{ effort:'low' }, stream: true,
+    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 4000, reasoning:{ effort:'low' }, stream: true, usage:{ include: true },
       messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
         ? [ ...t.atts.map(a => a.mime === 'application/pdf'
               ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
@@ -660,6 +732,11 @@ async function callOpenRouter(turns, system, onDelta){
   await readSSE(r, ev => {
     if (ev.error){ const e = new Error('OpenRouter: ' + (ev.error.message || 'خطأ')); e.isApiError = true; throw e; }
     if (ev.model) lastModel = ev.model.replace(/^google\//, '');
+    if (ev.usage){
+      const u = ev.usage, actual = typeof u.cost === 'number';
+      lastUsage = { inTok: u.prompt_tokens || 0, outTok: u.completion_tokens || 0,
+        usd: actual ? u.cost : estimateUsd(model, u.prompt_tokens, u.completion_tokens), est: !actual };
+    }
     const c = ev.choices && ev.choices[0] && ev.choices[0].delta && ev.choices[0].delta.content;
     if (c){ text += c; if (onDelta) onDelta(text); }
   });
@@ -712,7 +789,24 @@ function renderAll(){
     n.innerHTML = '<b>✳ مجلس الثلاثة</b><br>اكتب فكرتك أو سجّلها بصوتك.<br>«يردّان مرة»: كل واحد يرد بالدور.<br>«نقاش + خلاصة»: يتناقشان فيما بينهما ثم يعطونك الخلاصة.';
     chat.appendChild(n);
   }
-  history.forEach(m => bubble(m.who, m.text, m.summary ? 'summary' : '', m.model, m.atts));
+  history.forEach(m => appendCost(bubble(m.who, m.text, m.summary ? 'summary' : '', m.model, m.atts), m));
+  updateCostUI();
+}
+/* سطر صغير تحت كل رد: التكلفة وحجم السياق المرسل */
+function appendCost(div, m){
+  if (!div || !m || !m.cost) return div;
+  const c = m.cost, el = document.createElement('div'); el.className = 'costline';
+  const price = c.free ? 'مجاني (Google)' : (c.usd == null ? 'السعر غير متوفر' : (c.est ? '≈ ' : '') + fmtUsd(c.usd));
+  el.textContent = price + (c.inTok ? ' · السياق المرسل ' + fmtTok(c.inTok) + ' توكن' : '');
+  el.title = c.est ? 'تقدير: عدد التوكنز × تسعيرة OpenRouter' : 'تكلفة فعلية من OpenRouter';
+  div.appendChild(el);
+  return div;
+}
+function chatSpend(){ return history.reduce((a, m) => a + (m.cost && m.cost.usd || 0), 0); }
+function updateCostUI(){
+  const el = document.getElementById('chatCost'); if (!el) return;
+  const v = chatSpend();
+  el.textContent = v ? '≈ ' + fmtUsd(v) : '';
 }
 
 /* ===== منطق المحادثة ===== */
@@ -720,7 +814,7 @@ let busy = false, stopRequested = false, aborter = null;
 
 async function speak(who, extra, isSummary){
   const typing = bubble(who, '…يكتب', 'typing');
-  typingEl = typing; lastModel = '';
+  typingEl = typing; lastModel = ''; lastUsage = null;
   aborter = new AbortController();
   try{
     const CALL_NOTE = 'أنت الآن في مكالمة صوتية: رد بجملتين إلى أربع جمل قصيرة بأسلوب كلام طبيعي، بدون قوائم أو عناوين أو رموز أو إيموجي.';
@@ -748,12 +842,18 @@ async function speak(who, extra, isSummary){
     };
     const text = who === 'claude' ? await callClaude(turns, sys, onDelta) : await callGemini(turns, sys, onDelta);
     typing.remove();
+    // التكلفة تُحسب حتى لو انسحب الطرف بـ[تم]، لأن الطلب نفسه مدفوع
+    const cost = lastUsage ? { usd: lastUsage.usd, est: !!lastUsage.est, free: !!lastUsage.free,
+      inTok: lastUsage.inTok || 0, outTok: lastUsage.outTok || 0 } : null;
+    if (cost && cost.usd) addSpend(who === 'claude' ? 'claude' : 'gemini', cost.usd);
     // رد فارغ أو [تم] = لا يوجد شيء جديد يضيفه: نتجاوزه بهدوء وننهي النقاش
     if (!text || /^\[?\s*تم\s*\]?\.?$/.test(text)){ if (live) live.remove(); return 'done'; }
     const m = { who, text, ts:Date.now(), model: who === 'claude' ? S.claudeModel : lastModel };
     if (isSummary) m.summary = true;
+    if (cost) m.cost = cost;
     history.push(m); saveAll();
     const fin = bubble(who, text, cls, m.model);
+    appendCost(fin, m); updateCostUI();
     if (live){ live.replaceWith(fin); }
     // باقي النص الذي لم يُقرأ بعد (أو كله إذا لم يكن الرد متدفقاً)
     const tail = text.slice(Math.min(spoken, text.length));
@@ -884,12 +984,14 @@ async function transcribe(blob){
     // عبر OpenRouter: نموذج أقوى وبدون ازدحام الطبقة المجانية
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', { method:'POST',
       headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey, 'X-Title':'Majlis' },
-      body: JSON.stringify({ model:'google/gemini-3.8-flash', max_tokens:1000, reasoning:{ effort:'low' },
+      body: JSON.stringify({ model:'google/gemini-3.8-flash', max_tokens:1000, reasoning:{ effort:'low' }, usage:{ include: true },
         messages:[{ role:'user', content:[
           { type:'input_audio', input_audio:{ data:b64, format:'wav' } },
           { type:'text', text:prompt } ] }] }) });
     const d = await r.json().catch(() => ({}));
     if (r.ok){
+      const u = d.usage || {};
+      addSpend('voice', typeof u.cost === 'number' ? u.cost : estimateUsd('google/gemini-3.8-flash', u.prompt_tokens, u.completion_tokens));
       const m = d.choices && d.choices[0] && d.choices[0].message;
       return (m && m.content || '').trim();
     }
@@ -998,6 +1100,24 @@ async function pumpSpeech(){
   ttsBusy = false;
   if (ttsQueue.length) pumpSpeech();
 }
+/* تكلفة الصوت: فعلية من OpenRouter إن أمكن، وإلا تقدير حسب طول النص */
+function recordTtsCost(genId, model, text){
+  const estimate = () => {
+    const pr = priceFor(model); if (!pr) return;
+    const inTok = Math.ceil(text.length / 3), outTok = Math.ceil(text.length / 14 * 25);   // ~25 توكن صوت لكل ثانية
+    addSpend('voice', inTok * pr.i + outTok * pr.o);
+  };
+  if (!genId) return estimate();
+  setTimeout(async () => {
+    try{
+      const r = await fetch('https://openrouter.ai/api/v1/generation?id=' + encodeURIComponent(genId),
+        { headers:{ 'authorization':'Bearer ' + S.orKey } });
+      const d = await r.json();
+      const c = d && d.data && (d.data.total_cost ?? d.data.usage);
+      if (r.ok && typeof c === 'number') addSpend('voice', c); else estimate();
+    }catch(e){ estimate(); }
+  }, 4000);
+}
 const OR_TTS_MODELS = ['google/gemini-3.8-flash-tts', 'google/gemini-3.1-flash-tts-preview'];
 async function synth(who, text){
   if (S.ttsEngine === 'device') return null;
@@ -1013,7 +1133,11 @@ async function synth(who, text){
           body: JSON.stringify({ model, input:text, voice, response_format:'mp3' }) }).catch(() => null);
         if (r && r.ok){
           const buf = await r.arrayBuffer();
-          if (buf.byteLength > 1000){ store.set('majlis_ortts_ok', model); return { buf }; }
+          if (buf.byteLength > 1000){
+            store.set('majlis_ortts_ok', model);
+            recordTtsCost(r.headers.get('x-generation-id'), model, text);
+            return { buf };
+          }
         }
         if (r && r.status === 404) break;                // نموذج غير موجود: جرّب التالي
         await new Promise(z => setTimeout(z, 700));      // ازدحام أو خطأ مؤقت: إعادة محاولة
@@ -1084,6 +1208,39 @@ function deviceSay(who, text){
     speechSynthesis.speak(u);
   });
 }
+
+/* ===== تنبيه الحد الشهري ===== */
+let spendDismissed = '';
+function checkLimit(){
+  const b = document.getElementById('spendBanner'); if (!b) return;
+  const lim = +S.monthLimit || 0, tot = monthSpend();
+  const level = !lim ? '' : tot >= lim ? 'over' : tot >= lim * 0.8 ? 'warn' : '';
+  if (!level || spendDismissed === level + monthKey()){ b.className = 'banner'; return; }
+  b.className = 'banner show ' + level;
+  F('spendText').textContent = level === 'over'
+    ? `⛔ تجاوزت حدّك الشهري: ≈ ${fmtUsd(tot)} من ${fmtUsd(lim)}`
+    : `⚠️ اقتربت من حدّك الشهري: ≈ ${fmtUsd(tot)} من ${fmtUsd(lim)} (${Math.round(tot / lim * 100)}%)`;
+  F('spendText').dataset.level = level;
+}
+document.getElementById('spendX').onclick = () => {
+  spendDismissed = (F('spendText').dataset.level || '') + monthKey();
+  document.getElementById('spendBanner').className = 'banner';
+};
+
+/* ===== تذكير النسخة الاحتياطية الأسبوعي ===== */
+function checkBackupReminder(){
+  const last = store.get('majlis_lastBackup', 0), snooze = store.get('majlis_backupSnooze', 0);
+  const week = 7*24*3600*1000, day = 24*3600*1000;
+  const due = !last ? history.length > 0 || chats.length > 1 : Date.now() - last > week;
+  const show = due && Date.now() - snooze > day;
+  F('backupText').textContent = last ? '💾 مرّ أسبوع بدون نسخة احتياطية لمحادثاتك' : '💾 لم تحفظ أي نسخة احتياطية لمحادثاتك بعد';
+  document.getElementById('backupBanner').classList.toggle('show', show);
+}
+document.getElementById('backupNow').onclick = () => F('backupBtn').click();
+document.getElementById('backupX').onclick = () => {
+  store.set('majlis_backupSnooze', Date.now());
+  document.getElementById('backupBanner').classList.remove('show');
+};
 
 /* ===== وضع المكالمة: تتكلم ← يردّان بالصوت ← يفتح الميكروفون تلقائياً ===== */
 const callEl = document.getElementById('call'), orb = document.getElementById('orb');
@@ -1237,7 +1394,14 @@ function shrinkImage(file){
 /* ===== الإعدادات ===== */
 const dlg = document.getElementById('settings');
 const F = id => document.getElementById(id);
+function renderCostBox(){
+  const m = monthParts(), tot = monthSpend();
+  const lim = +S.monthLimit || 0;
+  F('costBox').innerHTML = `<b>≈ ${fmtUsd(tot)}</b>${lim ? ` من حدّ ${fmtUsd(lim)} (${Math.round(tot / lim * 100)}%)` : ''}<br>`
+    + `Claude: ${fmtUsd(m.claude || 0)} · Gemini: ${fmtUsd(m.gemini || 0)} · الصوت: ${fmtUsd(m.voice || 0)}`;
+}
 document.getElementById('openSettings').onclick = () => {
+  renderCostBox(); F('monthLimit').value = S.monthLimit || '';
   F('claudeKey').value = S.claudeKey; F('geminiKey').value = S.geminiKey;
   F('orKey').value = S.orKey; F('orModel').value = S.orModel;
   F('ttsEngine').value = S.ttsEngine;
@@ -1251,6 +1415,7 @@ document.getElementById('openSettings').onclick = () => {
 };
 F('closeSettings').onclick = () => dlg.close();
 F('saveSettings').onclick = () => {
+  S.monthLimit = Math.max(0, +F('monthLimit').value || 0); spendDismissed = '';
   S.claudeKey = F('claudeKey').value.trim(); S.geminiKey = F('geminiKey').value.trim();
   S.orKey = F('orKey').value.trim(); S.orModel = F('orModel').value.trim() || DEFAULTS.orModel;
   S.ttsEngine = F('ttsEngine').value; S.claudeVoice = F('claudeVoice').value; S.geminiVoice = F('geminiVoice').value;
@@ -1258,7 +1423,7 @@ F('saveSettings').onclick = () => {
   S.geminiModel = F('geminiModel').value.trim() || DEFAULTS.geminiModel;
   S.rounds = +F('rounds').value || 2; S.autoSend = F('autoSend').checked;
   store.set('majlis_gemini_ok', null);   // بعد تغيير الإعدادات نبدأ من النموذج المختار
-  saveAll(); dlg.close();
+  saveAll(); dlg.close(); checkLimit();
 };
 F('clearChat').onclick = () => { if (confirm('مسح رسائل هذه المحادثة؟')){ attDel(chatFileIds(history)); history = []; saveAll(); renderAll(); dlg.close(); } };
 
@@ -1268,6 +1433,7 @@ modeSel.onchange = () => { S.mode = modeSel.value; saveAll(); };
 
 /* ===== النسخ الاحتياطي: كل المحادثات والملفات في ملف واحد مشفر ===== */
 F('backupBtn').onclick = async () => {
+  if (!store.get('majlis_lastBackup', 0) && !confirm('⚠️ تنبيه مهم قبل أول نسخة احتياطية:\n\nستختار الآن كلمة سر للملف. إذا ضاعت هذه الكلمة، لا يستطيع أحد فتح الملف أو استرجاع محادثاتك منه، لا أنت ولا أي شخص آخر.\n\nاكتبها في مكان آمن. هل تريد المتابعة؟')) return;
   const pass = prompt('اختر كلمة سر لملف النسخة الاحتياطية (احفظها جيداً، بدونها لا يُفتح الملف):');
   if (!pass) return;
   if (pass.length < 6) return alert('كلمة السر قصيرة (6 أحرف على الأقل)');
@@ -1287,11 +1453,17 @@ F('backupBtn').onclick = async () => {
     'majlis-' + new Date().toISOString().slice(0, 10) + '.majlis', { type:'application/octet-stream' });
   // المشاركة تتيح الحفظ مباشرة في Google Drive أو إرساله لنفسك
   if (navigator.canShare && navigator.canShare({ files:[file] })){
-    try{ await navigator.share({ files:[file], title:'نسخة احتياطية - مجلس الثلاثة' }); return; }catch(e){ if (e.name === 'AbortError') return; }
+    try{ await navigator.share({ files:[file], title:'نسخة احتياطية - مجلس الثلاثة' }); backupDone(); return; }
+    catch(e){ if (e.name === 'AbortError') return; }
   }
   const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  backupDone();
 };
+function backupDone(){
+  store.set('majlis_lastBackup', Date.now());
+  document.getElementById('backupBanner').classList.remove('show');
+}
 F('restoreBtn').onclick = () => F('restoreFile').click();
 F('restoreFile').onchange = async () => {
   const f = F('restoreFile').files[0]; F('restoreFile').value = '';
@@ -1387,6 +1559,7 @@ async function autoTitle(){
       body: JSON.stringify({ model:'claude-haiku-5-5', max_tokens:30,
         messages:[{ role:'user', content:'اكتب عنواناً قصيراً جداً (من 2 إلى 5 كلمات، بدون علامات تنصيص) لمحادثة تبدأ بهذه الرسالة:\n' + userMsgs[0].text.slice(0, 500) }] }) });
     const d = await r.json();
+    if (d.usage) addSpend('claude', estimateUsd('anthropic/claude-haiku-5-5', d.usage.input_tokens, d.usage.output_tokens));
     const t = (d.content || []).map(b => b.text || '').join('').replace(/["«»\n]/g, '').trim();
     if (r.ok && t && t.length < 60){ c.title = t; store.set('majlis_chats', chats); renderChatList(); }
   }catch(e){}
@@ -1551,6 +1724,7 @@ async function start(uid, dek){
   F('whoami').textContent = acc ? '👤 ' + acc.user : '';
   modeSel.value = S.mode;
   updateTtsBtn(); setSendState(); renderAll(); renderChatList();
+  loadPrices(); checkLimit(); checkBackupReminder();
   if (!S.claudeKey || !(S.geminiKey || S.orKey)) setTimeout(() => document.getElementById('openSettings').click(), 300);
 }
 document.getElementById('bioToggle').onclick = async () => {
