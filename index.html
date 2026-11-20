@@ -137,7 +137,8 @@ function systemPrompt(me){
 اجعل ردودك قصيرة ومركزة كأننا في جلسة عصف ذهني حية.
 رد بنفس لغة ولهجة المستخدم.
 الرسائل تصلك موسومة بأسماء أصحابها مثل [المستخدم] و[${o}]. لا تكتب وسم اسمك في بداية ردك، التطبيق يضيفه.
-لا تتكلم نيابةً عن ${o} ولا تكتب رده.`;
+لا تتكلم نيابةً عن ${o} ولا تكتب رده.
+خاطب المستخدم مباشرة بصيغة «أنت»، ولا تكتب «@المستخدم» أو «[المستخدم]» في ردك.`;
 }
 
 /* يحوّل السجل المشترك إلى أدوار يفهمها كل نموذج: رسائله = assistant، والباقي = user موسوم بالاسم */
@@ -237,7 +238,7 @@ async function callOpenRouter(turns, system){
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
-    body: JSON.stringify({ model:S.orModel, max_tokens:4000,
+    body: JSON.stringify({ model:S.orModel, max_tokens:4000, reasoning:{ effort:'low' },
       messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content:t.text }))] })
   });
   const d = await r.json().catch(() => ({}));
