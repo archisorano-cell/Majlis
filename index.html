@@ -241,7 +241,7 @@ async function speak(who, extra, isSummary){
 
 function detectTarget(text){
   const t = text.toLowerCase();
-  const c = /@claude|@كلود/.test(t), g = /@gemini|@جيميناي|@جيمناي/.test(t);
+  const c = /@\s*(claude|كلود)/.test(t), g = /@\s*(gemini|جيميناي|جيمناي|جمناي)/.test(t);
   if (c && !g) return 'claude';
   if (g && !c) return 'gemini';
   return null;
@@ -257,8 +257,14 @@ async function send(){
   busy = true; stopRequested = false; setSendState();
   try{
     const target = detectTarget(text);
+    const ready = ['claude','gemini'].filter(w => w === 'claude' ? S.claudeKey : S.geminiKey);
     if (target){
       await speak(target);
+    } else if (ready.length < 2){
+      // إذا كان مفتاح واحد فقط موجوداً، يرد صاحبه وحده بدل أن تتوقف المحادثة
+      if (!ready.length) throw (bubble('error', '⚠️ ضع مفتاحاً واحداً على الأقل في الإعدادات ⚙️'), new Error('no keys'));
+      bubble('error', `ℹ️ مفتاح ${LABEL[other(ready[0])]} غير موجود، سيرد ${LABEL[ready[0]]} وحده`);
+      await speak(ready[0]);
     } else {
       const a = nextFirst, b = other(a);
       nextFirst = b; saveAll();   // نبدّل من يبدأ كل مرة حتى لا يتأثر أحد دائماً بالآخر
