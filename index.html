@@ -3,58 +3,95 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
-<meta name="theme-color" content="#14171c">
+<meta name="theme-color" content="#181818">
 <meta name="mobile-web-app-capable" content="yes">
 <title>مجلس الثلاثة</title>
 <style>
+  /* أسلوب واجهة Claude بألوان أسود رصاصي */
   :root{
-    --bg:#14171c; --panel:#1c2027; --line:#2a2f38; --text:#e9ecf1; --muted:#8b93a1;
-    --user:#2b5d8a; --claude:#c96f4a; --gemini:#4a7fd9; --ok:#3fa36b; --err:#d0564b;
+    --bg:#181818; --panel:#212121; --surface:#2a2a2a; --line:#353535; --text:#ececec; --muted:#9a9a9a;
+    --user:#2f2f2f; --claude:#d97757; --gemini:#6c9bf0; --ok:#5fae7b; --err:#d0564b;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
     font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;font-size:16px}
   body{display:flex;flex-direction:column;height:100dvh}
-  header{display:flex;align-items:center;gap:8px;padding:10px 12px;
-    padding-top:calc(10px + env(safe-area-inset-top));background:var(--panel);border-bottom:1px solid var(--line)}
-  header h1{font-size:17px;margin:0;flex:1;white-space:nowrap}
   select,button,input,textarea{font:inherit;color:inherit}
-  select{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:6px 8px}
-  .icon{background:none;border:none;font-size:22px;padding:4px 6px;cursor:pointer}
-  main{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
-  .msg{max-width:88%;padding:10px 12px;border-radius:14px;line-height:1.6;word-wrap:break-word;white-space:normal}
-  .msg .who{font-size:12px;font-weight:700;margin-bottom:4px;opacity:.9}
-  .msg.user{align-self:flex-start;background:var(--user)}
-  .msg.claude{align-self:flex-end;background:var(--panel);border-right:4px solid var(--claude)}
+
+  /* الشريط العلوي: بسيط وشفاف */
+  header{display:flex;align-items:center;gap:6px;padding:10px 14px;
+    padding-top:calc(10px + env(safe-area-inset-top));background:var(--bg)}
+  header h1{font-size:17px;font-weight:600;margin:0;flex:1;white-space:nowrap;letter-spacing:.2px}
+  header h1::before{content:"✳ ";color:var(--claude)}
+  select{background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:14px}
+  .icon{background:none;border:none;font-size:19px;padding:6px 8px;border-radius:10px;cursor:pointer;filter:grayscale(1) brightness(1.4)}
+  .icon:active{background:var(--surface)}
+
+  /* المحادثة: عمود في الوسط */
+  main{flex:1;overflow-y:auto;padding:12px 16px 24px}
+  main > *{max-width:760px;margin-inline:auto}
+  #chat{display:flex;flex-direction:column;gap:18px}
+  .msg{line-height:1.75;word-wrap:break-word;width:100%}
+  .msg .who{font-size:13px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+  /* رسائلك: فقاعة رمادية */
+  .msg.user{align-self:flex-start;width:auto;max-width:85%;background:var(--user);
+    padding:10px 14px;border-radius:20px}
+  .msg.user .who{display:none}
+  /* ردودنا: نص مفتوح بدون فقاعة، مثل Claude */
+  .msg.claude, .msg.gemini{align-self:stretch;max-width:760px;padding:2px 2px}
   .msg.claude .who{color:var(--claude)}
-  .msg.gemini{align-self:flex-end;background:var(--panel);border-right:4px solid var(--gemini)}
+  .msg.claude .who::before{content:"✳";font-size:16px}
   .msg.gemini .who{color:var(--gemini)}
-  .msg.summary{outline:1px dashed var(--ok)}
-  .msg.error{align-self:center;background:#3a1f1f;color:#ffd2cc;font-size:14px}
-  .msg.typing{opacity:.7;font-style:italic}
-  .note{align-self:center;color:var(--muted);font-size:13px;text-align:center;max-width:90%}
-  footer{display:flex;align-items:flex-end;gap:8px;padding:8px 10px;
-    padding-bottom:calc(8px + env(safe-area-inset-bottom));background:var(--panel);border-top:1px solid var(--line)}
-  textarea{flex:1;resize:none;max-height:140px;min-height:44px;background:var(--bg);
-    border:1px solid var(--line);border-radius:14px;padding:10px 12px;line-height:1.5}
-  .round{width:44px;height:44px;border-radius:50%;border:none;font-size:20px;flex:none;cursor:pointer}
-  #mic{background:var(--line)}
-  #mic.rec{background:var(--err);animation:pulse 1s infinite}
-  #send{background:var(--ok);color:#fff}
-  #send.stop{background:var(--err)}
+  .msg.gemini .who::before{content:"✦";font-size:15px}
+  .msg.summary{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px 14px}
+  .msg.error{align-self:center;width:auto;background:#3a2222;color:#ffd2cc;font-size:14px;padding:8px 12px;border-radius:12px}
+  .msg.typing{opacity:.6;font-style:italic}
+  .note{align-self:center;color:var(--muted);font-size:14px;text-align:center;line-height:1.9;margin-top:18vh}
+  .note b{color:var(--text);font-size:20px;font-weight:600}
+
+  /* صندوق الكتابة: مستطيل دائري فيه الأزرار، مثل Claude */
+  footer{padding:8px 12px;padding-bottom:calc(10px + env(safe-area-inset-bottom));background:var(--bg)}
+  .composer{max-width:760px;margin:0 auto;background:var(--panel);border:1px solid var(--line);
+    border-radius:24px;padding:8px 10px 8px;box-shadow:0 2px 12px rgba(0,0,0,.35)}
+  textarea{width:100%;resize:none;max-height:160px;min-height:28px;background:transparent;border:none;
+    outline:none;padding:6px 6px;line-height:1.5}
+  textarea::placeholder{color:var(--muted)}
+  .tools{display:flex;align-items:center;gap:6px}
+  .tools .spacer{flex:1}
+  .round{width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:transparent;
+    font-size:17px;flex:none;cursor:pointer;display:grid;place-items:center}
+  #attach{font-size:22px;font-weight:300}
+  #mic{filter:grayscale(1) brightness(1.5)}
+  #mic.rec{filter:none;background:var(--err);border-color:var(--err);animation:pulse 1s infinite}
+  #send{background:var(--claude);border-color:var(--claude);color:#1a1a1a;font-weight:700;border-radius:12px}
+  #send.stop{background:var(--text);border-color:var(--text)}
   @keyframes pulse{50%{opacity:.6}}
-  dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:16px;
-    width:min(94vw,460px);max-height:90dvh;padding:16px}
-  dialog::backdrop{background:rgba(0,0,0,.6)}
-  dialog h2{margin:0 0 12px;font-size:18px}
+
+  /* المرفقات */
+  #pending{display:none;gap:8px;padding:2px 2px 6px;overflow-x:auto}
+  #pending.show{display:flex}
+  .chip{position:relative;flex:none;border:1px solid var(--line);border-radius:12px;background:var(--surface);
+    font-size:12px;max-width:150px;display:flex;align-items:center;gap:6px;padding:4px 22px 4px 6px}
+  .chip img{width:44px;height:44px;object-fit:cover;border-radius:8px}
+  .chip .x{position:absolute;top:2px;left:5px;cursor:pointer;opacity:.8}
+  .chip span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .atts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+  .atts img{max-width:200px;max-height:200px;border-radius:12px;display:block}
+  .atts .pdf{background:rgba(0,0,0,.3);border-radius:10px;padding:6px 10px;font-size:13px}
+
+  /* نافذة الإعدادات */
+  dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:18px;
+    width:min(94vw,460px);max-height:90dvh;padding:18px}
+  dialog::backdrop{background:rgba(0,0,0,.65)}
+  dialog h2{margin:0 0 12px;font-size:18px;font-weight:600}
   label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
   dialog input[type=text],dialog input[type=password],dialog input[type=number]{
     width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:9px 10px;direction:ltr}
   .row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:14px}
   .btns{display:flex;gap:8px;margin-top:16px}
-  .btn{flex:1;padding:10px;border-radius:10px;border:none;background:var(--line);cursor:pointer}
-  .btn.primary{background:var(--ok);color:#fff}
-  .btn.danger{background:#5a2a2a}
+  .btn{flex:1;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--surface);cursor:pointer}
+  .btn.primary{background:var(--claude);border-color:var(--claude);color:#1a1a1a;font-weight:600}
+  .btn.danger{background:#3a2222;border-color:#4a2a2a}
   .hint{font-size:12px;color:var(--muted);margin-top:4px}
 </style>
 </head>
@@ -72,9 +109,17 @@
 <main id="chat"></main>
 
 <footer>
-  <button class="round" id="mic" title="تسجيل صوتي">🎙️</button>
-  <textarea id="input" rows="1" placeholder="اكتب… واذكر «كلاود» أو «جيمي» لتوجيه السؤال لواحد"></textarea>
-  <button class="round" id="send" title="إرسال">➤</button>
+  <div class="composer">
+    <div id="pending"></div>
+    <textarea id="input" rows="1" placeholder="اكتب لكلاود وجيمي…"></textarea>
+    <div class="tools">
+      <button class="round" id="attach" title="إرفاق صورة أو PDF">+</button>
+      <input type="file" id="fileInput" accept="image/*,application/pdf" multiple hidden>
+      <button class="round" id="mic" title="تسجيل صوتي">🎙️</button>
+      <span class="spacer"></span>
+      <button class="round" id="send" title="إرسال">↑</button>
+    </div>
+  </div>
 </footer>
 
 <dialog id="settings">
@@ -142,22 +187,68 @@ function systemPrompt(me){
 }
 
 /* يحوّل السجل المشترك إلى أدوار يفهمها كل نموذج: رسائله = assistant، والباقي = user موسوم بالاسم */
-function buildTurns(me, extra){
+/* كل دور = { role, text, atts:[{mime,data,name}] }
+   المرفقات تُرسل كاملة فقط لآخر 3 رسائل فيها مرفقات (لتوفير التكلفة)، والأقدم يُذكر اسمها فقط */
+async function buildTurns(me, extra){
   const turns = [];
-  for (const m of history.slice(-60)){
+  const recent = history.slice(-60);
+  const withAtts = recent.filter(m => m.atts && m.atts.length).slice(-3);
+  for (const m of recent){
     const role = m.who === me ? 'assistant' : 'user';
-    const text = role === 'assistant' ? m.text : `[${LABEL[m.who]}]: ${m.text}`;
+    let text = role === 'assistant' ? m.text : `[${LABEL[m.who]}]: ${m.text}`;
+    const atts = [];
+    if (m.atts && m.atts.length){
+      if (withAtts.includes(m)){
+        for (const a of m.atts){
+          const data = await attGet(a.id);
+          if (data) atts.push({ mime:a.mime, name:a.name, data });
+          else text += `\n[مرفق لم يعد متوفراً: ${a.name}]`;
+        }
+      } else {
+        text += '\n' + m.atts.map(a => `[مرفق سابق: ${a.name}]`).join(' ');
+      }
+    }
     const last = turns[turns.length-1];
-    if (last && last.role === role) last.text += '\n\n' + text;
-    else turns.push({ role, text });
+    if (last && last.role === role){ last.text += '\n\n' + text; last.atts.push(...atts); }
+    else turns.push({ role, text, atts });
   }
   while (turns.length && turns[0].role === 'assistant') turns.shift();
   if (extra){
     const last = turns[turns.length-1];
     if (last && last.role === 'user') last.text += '\n\n[ملاحظة من التطبيق]: ' + extra;
-    else turns.push({ role:'user', text:'[ملاحظة من التطبيق]: ' + extra });
+    else turns.push({ role:'user', text:'[ملاحظة من التطبيق]: ' + extra, atts:[] });
   }
+  // المرفقات لا تُرسل إلا في أدوار المستخدم
+  turns.forEach(t => { if (t.role === 'assistant') t.atts = []; });
   return turns;
+}
+
+/* ===== تخزين المرفقات في IndexedDB (localStorage صغير جداً للصور) ===== */
+let _db = null;
+function attDB(){
+  if (_db) return _db;
+  _db = new Promise((res, rej) => {
+    const r = indexedDB.open('majlis_files', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('files');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  return _db;
+}
+async function attPut(id, data){
+  const db = await attDB();
+  return new Promise((res, rej) => { const tx = db.transaction('files','readwrite');
+    tx.objectStore('files').put(data, id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+}
+async function attGet(id){
+  try{ const db = await attDB();
+    return await new Promise(res => { const q = db.transaction('files').objectStore('files').get(id);
+      q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); });
+  }catch(e){ return null; }
+}
+async function attClear(){
+  try{ const db = await attDB();
+    await new Promise(res => { const tx = db.transaction('files','readwrite'); tx.objectStore('files').clear(); tx.oncomplete = res; tx.onerror = res; });
+  }catch(e){}
 }
 
 /* ===== الاتصال بالنماذج ===== */
@@ -168,7 +259,12 @@ async function callClaude(turns, system){
     headers:{ 'content-type':'application/json', 'x-api-key':S.claudeKey,
       'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
     body: JSON.stringify({ model:S.claudeModel, max_tokens:1500, system,
-      messages: turns.map(t => ({ role:t.role, content:t.text })) })
+      messages: turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
+        ? [ ...t.atts.map(a => a.mime === 'application/pdf'
+              ? { type:'document', source:{ type:'base64', media_type:a.mime, data:a.data } }
+              : { type:'image', source:{ type:'base64', media_type:a.mime, data:a.data } }),
+            { type:'text', text:t.text } ]
+        : t.text })) })
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error('Claude: ' + (d.error && d.error.message || r.status));
@@ -239,7 +335,12 @@ async function callOpenRouter(turns, system){
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
     body: JSON.stringify({ model:S.orModel, max_tokens:4000, reasoning:{ effort:'low' },
-      messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content:t.text }))] })
+      messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
+        ? [ ...t.atts.map(a => a.mime === 'application/pdf'
+              ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
+              : { type:'image_url', image_url:{ url:`data:${a.mime};base64,${a.data}` } }),
+            { type:'text', text:t.text } ]
+        : t.text }))] })
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error('OpenRouter: ' + (d.error && d.error.message || r.status));
@@ -252,7 +353,8 @@ function callGemini(turns, system){
   if (S.orKey) return callOpenRouter(turns, system);
   return geminiRequest({
     systemInstruction:{ parts:[{ text:system }] },
-    contents: turns.map(t => ({ role: t.role === 'assistant' ? 'model' : 'user', parts:[{ text:t.text }] }))
+    contents: turns.map(t => ({ role: t.role === 'assistant' ? 'model' : 'user',
+      parts:[ ...(t.atts || []).map(a => ({ inlineData:{ mimeType:a.mime, data:a.data } })), { text:t.text } ] }))
   }, true);
 }
 
@@ -264,11 +366,24 @@ const sendBtn = document.getElementById('send');
 function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmt(s){ return esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>'); }
 
-function bubble(who, text, cls, model){
+function bubble(who, text, cls, model, atts){
   const div = document.createElement('div');
   div.className = 'msg ' + who + (cls ? ' ' + cls : '');
-  const tag = model ? ` <span style="font-weight:400;opacity:.6;font-size:11px">· ${esc(model.replace(/^gemini-|^claude-/,''))}</span>` : '';
+  const tag = model ? ` <span style="font-weight:400;opacity:.6;font-size:11px;direction:ltr;unicode-bidi:isolate">· ${esc(model.replace(/^gemini-|^claude-/,''))}</span>` : '';
   div.innerHTML = (who !== 'error' ? `<div class="who">${SHOWN[who] || ''}${cls==='summary' ? ' · الخلاصة' : ''}${tag}</div>` : '') + fmt(text);
+  if (atts && atts.length){
+    const box = document.createElement('div'); box.className = 'atts';
+    atts.forEach(a => {
+      if (a.mime === 'application/pdf'){
+        const p = document.createElement('div'); p.className = 'pdf'; p.textContent = '📄 ' + a.name; box.appendChild(p);
+      } else {
+        const img = document.createElement('img'); img.alt = a.name; box.appendChild(img);
+        attGet(a.id).then(d => { if (d) img.src = `data:${a.mime};base64,${d}`; else img.replaceWith(Object.assign(document.createElement('div'), { className:'pdf', textContent:'🖼️ ' + a.name })); });
+      }
+    });
+    const whoEl = div.querySelector('.who');
+    if (whoEl) whoEl.after(box); else div.prepend(box);
+  }
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   return div;
@@ -277,10 +392,10 @@ function renderAll(){
   chat.innerHTML = '';
   if (!history.length){
     const n = document.createElement('div'); n.className = 'note';
-    n.innerHTML = 'أهلاً بك في مجلس الثلاثة 👋<br>اكتب فكرتك أو سجّلها بصوتك.<br>«يردّان مرة»: كل واحد يرد بالدور.<br>«نقاش + خلاصة»: يتناقشان فيما بينهما ثم يعطونك الخلاصة.';
+    n.innerHTML = '<b>✳ مجلس الثلاثة</b><br>اكتب فكرتك أو سجّلها بصوتك.<br>«يردّان مرة»: كل واحد يرد بالدور.<br>«نقاش + خلاصة»: يتناقشان فيما بينهما ثم يعطونك الخلاصة.';
     chat.appendChild(n);
   }
-  history.forEach(m => bubble(m.who, m.text, m.summary ? 'summary' : '', m.model));
+  history.forEach(m => bubble(m.who, m.text, m.summary ? 'summary' : '', m.model, m.atts));
 }
 
 /* ===== منطق المحادثة ===== */
@@ -291,7 +406,7 @@ async function speak(who, extra, isSummary){
   typingEl = typing; lastModel = '';
   aborter = new AbortController();
   try{
-    const turns = buildTurns(who, extra);
+    const turns = await buildTurns(who, extra);
     const sys = systemPrompt(who);
     const text = who === 'claude' ? await callClaude(turns, sys) : await callGemini(turns, sys);
     typing.remove();
@@ -321,11 +436,21 @@ function detectTarget(text){
 }
 
 async function send(){
-  const text = input.value.trim();
-  if (!text || busy) return;
+  let text = input.value.trim();
+  if ((!text && !pending.length) || busy) return;
+  if (!text) text = pending.some(a => a.mime === 'application/pdf') ? 'شوفوا هذا الملف' : 'شوفوا هذه الصورة';
   input.value = ''; autoGrow();
-  history.push({ who:'user', text, ts:Date.now() }); saveAll();
-  if (history.length === 1) renderAll(); else bubble('user', text);
+  const atts = [];
+  for (const a of pending){
+    const id = 'f' + Date.now() + Math.random().toString(36).slice(2, 7);
+    try{ await attPut(id, a.data); atts.push({ id, mime:a.mime, name:a.name }); }
+    catch(e){ bubble('error', '⚠️ تعذر حفظ المرفق: ' + a.name); }
+  }
+  pending = []; renderPending();
+  const um = { who:'user', text, ts:Date.now() };
+  if (atts.length) um.atts = atts;
+  history.push(um); saveAll();
+  if (history.length === 1) renderAll(); else bubble('user', text, '', '', atts);
 
   busy = true; stopRequested = false; setSendState();
   try{
@@ -365,7 +490,7 @@ async function send(){
 }
 
 function setSendState(){
-  sendBtn.textContent = busy ? '■' : '➤';
+  sendBtn.textContent = busy ? '■' : '↑';
   sendBtn.classList.toggle('stop', busy);
   sendBtn.title = busy ? 'إيقاف النقاش' : 'إرسال';
 }
@@ -447,6 +572,54 @@ function say(who, text){
   speechSynthesis.speak(u);
 }
 
+/* ===== المرفقات: صور و PDF ===== */
+let pending = [];   // { mime, name, data(base64), thumb }
+const pendingEl = document.getElementById('pending');
+const fileInput = document.getElementById('fileInput');
+document.getElementById('attach').onclick = () => fileInput.click();
+fileInput.onchange = async () => {
+  for (const f of fileInput.files){
+    try{
+      if (f.type === 'application/pdf'){
+        if (f.size > 20 * 1024 * 1024){ bubble('error', '⚠️ ملف PDF أكبر من 20MB: ' + f.name); continue; }
+        pending.push({ mime:'application/pdf', name:f.name, data: await toBase64(f) });
+      } else if (f.type.startsWith('image/')){
+        const data = await shrinkImage(f);
+        pending.push({ mime:'image/jpeg', name:f.name, data, thumb:`data:image/jpeg;base64,${data}` });
+      }
+    }catch(e){ bubble('error', '⚠️ تعذر قراءة الملف: ' + f.name); }
+  }
+  fileInput.value = '';
+  renderPending();
+};
+function renderPending(){
+  pendingEl.innerHTML = '';
+  pendingEl.classList.toggle('show', pending.length > 0);
+  pending.forEach((a, i) => {
+    const c = document.createElement('div'); c.className = 'chip';
+    c.innerHTML = a.thumb ? `<img src="${a.thumb}">` : `<span>📄 ${esc(a.name)}</span>`;
+    const x = document.createElement('span'); x.className = 'x'; x.textContent = '✕';
+    x.onclick = () => { pending.splice(i, 1); renderPending(); };
+    c.appendChild(x); pendingEl.appendChild(c);
+  });
+}
+/* تصغير صور الهاتف الكبيرة إلى 1600px لتقليل الحجم والتكلفة */
+function shrinkImage(file){
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const max = 1600, k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      res(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('img')); };
+    img.src = url;
+  });
+}
+
 /* ===== الإعدادات ===== */
 const dlg = document.getElementById('settings');
 const F = id => document.getElementById(id);
@@ -467,7 +640,7 @@ F('saveSettings').onclick = () => {
   store.set('majlis_gemini_ok', null);   // بعد تغيير الإعدادات نبدأ من النموذج المختار
   saveAll(); dlg.close();
 };
-F('clearChat').onclick = () => { if (confirm('مسح كل المحادثة؟')){ history = []; saveAll(); renderAll(); dlg.close(); } };
+F('clearChat').onclick = () => { if (confirm('مسح كل المحادثة؟')){ history = []; saveAll(); attClear(); renderAll(); dlg.close(); } };
 
 const modeSel = document.getElementById('mode');
 modeSel.value = S.mode;
