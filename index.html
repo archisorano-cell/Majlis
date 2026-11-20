@@ -22,7 +22,7 @@
   header{display:flex;align-items:center;gap:6px;padding:10px 14px;
     padding-top:calc(10px + env(safe-area-inset-top));background:var(--bg)}
   header h1{font-size:17px;font-weight:600;margin:0;flex:1;white-space:nowrap;letter-spacing:.2px}
-  header h1::before{content:"✳ ";color:var(--claude)}
+  header h1{overflow:hidden;text-overflow:ellipsis;font-size:15px}
   select{background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:14px}
   .icon{background:none;border:none;font-size:19px;padding:6px 8px;border-radius:10px;cursor:pointer;filter:grayscale(1) brightness(1.4)}
   .icon:active{background:var(--surface)}
@@ -79,6 +79,37 @@
   .atts img{max-width:200px;max-height:200px;border-radius:12px;display:block}
   .atts .pdf{background:rgba(0,0,0,.3);border-radius:10px;padding:6px 10px;font-size:13px}
 
+  /* القائمة الجانبية للمحادثات */
+  #drawer{position:fixed;inset:0;z-index:20;display:none}
+  #drawer.open{display:block}
+  #drawer .shade{position:absolute;inset:0;background:rgba(0,0,0,.55)}
+  #drawer .panel{position:absolute;top:0;bottom:0;right:0;width:min(84vw,330px);background:var(--panel);
+    border-left:1px solid var(--line);display:flex;flex-direction:column;
+    padding:calc(14px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))}
+  #drawer h3{margin:4px 6px 12px;font-size:16px;font-weight:600}
+  #newChat{width:100%;text-align:right;padding:10px 12px;border-radius:12px;border:1px solid var(--line);
+    background:var(--surface);cursor:pointer;margin-bottom:10px}
+  #chatList{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+  .citem{display:flex;align-items:center;gap:4px;padding:9px 10px;border-radius:10px;cursor:pointer}
+  .citem.active{background:var(--surface)}
+  .citem .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}
+  .citem button{background:none;border:none;color:var(--muted);font-size:14px;padding:2px 5px;cursor:pointer}
+  .dfoot{border-top:1px solid var(--line);padding-top:10px;margin-top:8px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--muted)}
+  .dfoot .u{flex:1}
+  .dfoot button{background:none;border:1px solid var(--line);border-radius:10px;padding:6px 10px;cursor:pointer;font-size:13px}
+
+  /* شاشة الدخول */
+  #lock{position:fixed;inset:0;z-index:50;background:var(--bg);display:none;align-items:center;justify-content:center;padding:24px}
+  #lock.show{display:flex}
+  #lock form{width:min(100%,360px);display:flex;flex-direction:column;gap:10px}
+  #lock .logo{font-size:40px;color:var(--claude);text-align:center}
+  #lock h2{margin:0;text-align:center;font-size:22px;font-weight:600}
+  #lock p{margin:0 0 6px;text-align:center;color:var(--muted);font-size:14px}
+  #lock input{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  #lock button[type=submit]{padding:12px;border-radius:12px;border:none;background:var(--claude);color:#1a1a1a;font-weight:600;cursor:pointer}
+  #lock .err{color:#ff9b8f;font-size:13px;text-align:center;min-height:18px}
+  #lock .reset{background:none;border:none;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:underline}
+
   /* نافذة الإعدادات */
   dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:18px;
     width:min(94vw,460px);max-height:90dvh;padding:18px}
@@ -97,7 +128,8 @@
 </head>
 <body>
 <header>
-  <h1>مجلس الثلاثة</h1>
+  <button class="icon" id="openDrawer" title="المحادثات">☰</button>
+  <h1 id="chatTitle">مجلس الثلاثة</h1>
   <select id="mode" aria-label="طريقة الرد">
     <option value="both">يردّان مرة</option>
     <option value="debate">نقاش + خلاصة</option>
@@ -105,6 +137,31 @@
   <button class="icon" id="ttsToggle" title="قراءة الردود بالصوت">🔇</button>
   <button class="icon" id="openSettings" title="الإعدادات">⚙️</button>
 </header>
+
+<div id="drawer">
+  <div class="shade"></div>
+  <div class="panel">
+    <h3>✳ مجلس الثلاثة</h3>
+    <button id="newChat">＋ محادثة جديدة</button>
+    <div id="chatList"></div>
+    <div class="dfoot"><span class="u" id="whoami"></span><button id="logout">خروج</button></div>
+  </div>
+</div>
+
+<div id="lock">
+  <form id="lockForm" autocomplete="on">
+    <div class="logo">✳</div>
+    <h2 id="lockTitle">مجلس الثلاثة</h2>
+    <p id="lockSub"></p>
+    <input id="lockUser" placeholder="الاسم" autocomplete="username" required>
+    <input id="lockPass" type="password" placeholder="كلمة السر" autocomplete="current-password" required>
+    <input id="lockPass2" type="password" placeholder="أعد كلمة السر" autocomplete="new-password">
+    <div class="err" id="lockErr"></div>
+    <button type="submit" id="lockBtn">دخول</button>
+    <button type="button" class="reset" id="lockSwitch">إنشاء حساب جديد</button>
+    <button type="button" class="reset" id="lockReset">نسيت كلمة السر؟ (يمسح بيانات هذا الحساب)</button>
+  </form>
+</div>
 
 <main id="chat"></main>
 
@@ -153,16 +210,67 @@
 
 <script>
 /* ===== التخزين ===== */
-const store = {
+/* كل حساب له بادئة خاصة في التخزين، فلا يرى حساب بيانات حساب آخر */
+let PFX = '';
+const raw = {
   get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
-  set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+  set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} },
+  del(k){ try{ localStorage.removeItem(k); }catch(e){} }
+};
+const store = {
+  get(k, d){ return raw.get(PFX + k, d); },
+  set(k, v){ raw.set(PFX + k, v); },
+  del(k){ raw.del(PFX + k); }
 };
 const DEFAULTS = { orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
   geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
-let S = Object.assign({}, DEFAULTS, store.get('majlis_settings', {}));
-let history = store.get('majlis_history', []);
-let nextFirst = store.get('majlis_nextFirst', 'claude');
-const saveAll = () => { store.set('majlis_settings', S); store.set('majlis_history', history); store.set('majlis_nextFirst', nextFirst); };
+let S = Object.assign({}, DEFAULTS);
+/* ===== المحادثات المحفوظة بأسماء (مثل Claude) ===== */
+let chats = [], currentId = null, history = [], nextFirst = 'claude';
+function loadAccount(uid){
+  PFX = 'majlis_u_' + uid + '_';
+  // أول حساب يُنشأ يرث بيانات النسخ السابقة (المحادثة والمفاتيح)
+  if (!raw.get('majlis_migrated', false)){
+    for (const k of ['majlis_settings','majlis_nextFirst','majlis_gemini_ok']){
+      const v = raw.get(k, null); if (v !== null){ raw.set(PFX + k, v); raw.del(k); }
+    }
+    const oldH = raw.get('majlis_history', null);
+    if (oldH && oldH.length){ raw.set(PFX + 'majlis_history', oldH); }
+    raw.del('majlis_history');
+    raw.set('majlis_migrated', true);
+  }
+  S = Object.assign({}, DEFAULTS, store.get('majlis_settings', {}));
+  chats = store.get('majlis_chats', []);          // [{ id, title, updated }]
+  currentId = store.get('majlis_current', null);
+  if (!chats.length){
+    const old = store.get('majlis_history', []);
+    const id = 'c' + Date.now();
+    chats = [{ id, title: old.length ? titleFrom(old) : 'محادثة جديدة', updated: Date.now() }];
+    store.set('majlis_chat_' + id, old);
+    store.del('majlis_history');
+    currentId = id;
+  }
+  if (!chats.find(c => c.id === currentId)) currentId = chats[0].id;
+  history = store.get('majlis_chat_' + currentId, []);
+  nextFirst = store.get('majlis_nextFirst', 'claude');
+}
+function titleFrom(h){
+  const first = h.find(m => m.who === 'user');
+  if (!first) return 'محادثة جديدة';
+  const t = first.text.replace(/\s+/g, ' ').trim();
+  return t.length > 40 ? t.slice(0, 40) + '…' : t;
+}
+const saveAll = () => {
+  store.set('majlis_settings', S); store.set('majlis_nextFirst', nextFirst);
+  store.set('majlis_chat_' + currentId, history);
+  const c = chats.find(c => c.id === currentId);
+  if (c){
+    c.updated = Date.now();
+    if (c.title === 'محادثة جديدة' && history.some(m => m.who === 'user')) c.title = titleFrom(history);
+  }
+  store.set('majlis_chats', chats); store.set('majlis_current', currentId);
+  if (typeof renderChatList === 'function') renderChatList();
+};
 
 /* ===== الأسماء والتعليمات ===== */
 const LABEL = { user:'المستخدم', claude:'Claude', gemini:'Gemini' };
@@ -245,6 +353,13 @@ async function attGet(id){
       q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); });
   }catch(e){ return null; }
 }
+async function attDel(ids){
+  try{ const db = await attDB();
+    await new Promise(res => { const tx = db.transaction('files','readwrite'); const st = tx.objectStore('files');
+      ids.forEach(id => st.delete(id)); tx.oncomplete = res; tx.onerror = res; });
+  }catch(e){}
+}
+const chatFileIds = h => h.flatMap(m => (m.atts || []).map(a => a.id));
 async function attClear(){
   try{ const db = await attDB();
     await new Promise(res => { const tx = db.transaction('files','readwrite'); tx.objectStore('files').clear(); tx.oncomplete = res; tx.onerror = res; });
@@ -487,6 +602,7 @@ async function send(){
     }
   }catch(e){ /* الخطأ ظاهر في الشات */ }
   busy = false; setSendState();
+  autoTitle();
 }
 
 function setSendState(){
@@ -640,14 +756,176 @@ F('saveSettings').onclick = () => {
   store.set('majlis_gemini_ok', null);   // بعد تغيير الإعدادات نبدأ من النموذج المختار
   saveAll(); dlg.close();
 };
-F('clearChat').onclick = () => { if (confirm('مسح كل المحادثة؟')){ history = []; saveAll(); attClear(); renderAll(); dlg.close(); } };
+F('clearChat').onclick = () => { if (confirm('مسح رسائل هذه المحادثة؟')){ attDel(chatFileIds(history)); history = []; saveAll(); renderAll(); dlg.close(); } };
 
 const modeSel = document.getElementById('mode');
-modeSel.value = S.mode;
+
 modeSel.onchange = () => { S.mode = modeSel.value; saveAll(); };
 
-updateTtsBtn(); setSendState(); renderAll();
-if (!S.claudeKey || !(S.geminiKey || S.orKey)) setTimeout(() => document.getElementById('openSettings').click(), 300);
+/* ===== قائمة المحادثات ===== */
+const drawer = document.getElementById('drawer');
+const chatList = document.getElementById('chatList');
+document.getElementById('openDrawer').onclick = () => { renderChatList(); drawer.classList.add('open'); };
+drawer.querySelector('.shade').onclick = () => drawer.classList.remove('open');
+
+function openChat(id){
+  if (busy) return;
+  saveAll();
+  currentId = id;
+  history = store.get('majlis_chat_' + id, []);
+  store.set('majlis_current', id);
+  renderAll(); renderChatList();
+  drawer.classList.remove('open');
+}
+document.getElementById('newChat').onclick = () => {
+  if (busy) return;
+  const empty = chats.find(c => !store.get('majlis_chat_' + c.id, []).length);
+  if (empty) return openChat(empty.id);
+  const id = 'c' + Date.now();
+  chats.unshift({ id, title:'محادثة جديدة', updated:Date.now() });
+  store.set('majlis_chat_' + id, []);
+  openChat(id);
+};
+function renderChatList(){
+  chatList.innerHTML = '';
+  [...chats].sort((a, b) => b.updated - a.updated).forEach(c => {
+    const row = document.createElement('div');
+    row.className = 'citem' + (c.id === currentId ? ' active' : '');
+    const t = document.createElement('span'); t.className = 't'; t.textContent = c.title;
+    const ren = document.createElement('button'); ren.textContent = '✎'; ren.title = 'تغيير الاسم';
+    const del = document.createElement('button'); del.textContent = '🗑'; del.title = 'حذف';
+    row.onclick = () => openChat(c.id);
+    ren.onclick = e => { e.stopPropagation();
+      const n = prompt('اسم المحادثة:', c.title);
+      if (n && n.trim()){ c.title = n.trim(); store.set('majlis_chats', chats); renderChatList(); updateTitle(); } };
+    del.onclick = e => { e.stopPropagation();
+      if (busy || !confirm('حذف «' + c.title + '» نهائياً؟')) return;
+      attDel(chatFileIds(store.get('majlis_chat_' + c.id, [])));
+      store.del('majlis_chat_' + c.id);
+      chats = chats.filter(x => x.id !== c.id);
+      if (!chats.length){ const id = 'c' + Date.now(); chats = [{ id, title:'محادثة جديدة', updated:Date.now() }]; store.set('majlis_chat_' + id, []); }
+      if (c.id === currentId){ currentId = chats[0].id; history = store.get('majlis_chat_' + currentId, []); renderAll(); }
+      saveAll(); };
+    row.append(t, ren, del); chatList.appendChild(row);
+  });
+  updateTitle();
+}
+function updateTitle(){
+  const c = chats.find(c => c.id === currentId);
+  document.getElementById('chatTitle').textContent = c && c.title !== 'محادثة جديدة' ? c.title : 'مجلس الثلاثة';
+}
+
+/* تسمية ذكية: بعد أول رد يقترح Claude عنواناً قصيراً للمحادثة */
+async function autoTitle(){
+  const c = chats.find(c => c.id === currentId);
+  if (!c || c.named || !S.claudeKey) return;
+  const userMsgs = history.filter(m => m.who === 'user');
+  if (userMsgs.length !== 1) return;
+  c.named = true;
+  try{
+    const r = await fetch('https://api.anthropic.com/v1/messages', { method:'POST',
+      headers:{ 'content-type':'application/json', 'x-api-key':S.claudeKey,
+        'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+      body: JSON.stringify({ model:'claude-haiku-5-5', max_tokens:30,
+        messages:[{ role:'user', content:'اكتب عنواناً قصيراً جداً (من 2 إلى 5 كلمات، بدون علامات تنصيص) لمحادثة تبدأ بهذه الرسالة:\n' + userMsgs[0].text.slice(0, 500) }] }) });
+    const d = await r.json();
+    const t = (d.content || []).map(b => b.text || '').join('').replace(/["«»\n]/g, '').trim();
+    if (r.ok && t && t.length < 60){ c.title = t; store.set('majlis_chats', chats); renderChatList(); }
+  }catch(e){}
+}
+
+/* ===== شاشة الدخول: قفل محلي على هذا الهاتف ===== */
+const lock = document.getElementById('lock');
+const enc = new TextEncoder();
+const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+async function hashPass(pass, saltHex){
+  const salt = new Uint8Array(saltHex.match(/../g).map(h => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveBits']);
+  return hex(await crypto.subtle.deriveBits({ name:'PBKDF2', salt, iterations:150000, hash:'SHA-256' }, key, 256));
+}
+/* الحسابات: { uid: { user, salt, hash } } — الاسم غير حساس لحالة الأحرف */
+const users = () => raw.get('majlis_users', {});
+const uidOf = name => 'u' + hex(enc.encode(name.trim().toLowerCase())).slice(0, 40);
+let lockMode = 'login';
+function showLock(mode){
+  lockMode = mode || (Object.keys(users()).length ? 'login' : 'create');
+  const create = lockMode === 'create';
+  F('lockSub').textContent = create
+    ? 'أنشئ حساباً باسم وكلمة سر. كل حساب له محادثاته ومفاتيحه الخاصة'
+    : 'سجّل الدخول إلى حسابك';
+  F('lockPass2').style.display = create ? '' : 'none';
+  F('lockPass2').required = create;
+  F('lockBtn').textContent = create ? 'إنشاء الحساب والدخول' : 'دخول';
+  F('lockSwitch').textContent = create ? 'عندي حساب — تسجيل الدخول' : 'إنشاء حساب جديد';
+  F('lockSwitch').style.display = (create && !Object.keys(users()).length) ? 'none' : '';
+  F('lockReset').style.display = create ? 'none' : '';
+  F('lockErr').textContent = '';
+  const last = raw.get('majlis_lastUser', '');
+  F('lockUser').value = create ? '' : last;
+  lock.classList.add('show');
+}
+F('lockSwitch').onclick = () => showLock(lockMode === 'create' ? 'login' : 'create');
+F('lockForm').onsubmit = async e => {
+  e.preventDefault();
+  const user = F('lockUser').value.trim(), pass = F('lockPass').value;
+  const err = F('lockErr'); err.textContent = '';
+  if (!user) return err.textContent = 'اكتب الاسم';
+  const all = users(), uid = uidOf(user);
+  if (lockMode === 'create'){
+    if (all[uid]) return err.textContent = 'هذا الاسم موجود، اختر اسماً آخر أو سجّل الدخول';
+    if (pass.length < 4) return err.textContent = 'كلمة السر قصيرة (4 أحرف على الأقل)';
+    if (pass !== F('lockPass2').value) return err.textContent = 'كلمتا السر غير متطابقتين';
+    const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+    all[uid] = { user, salt, hash: await hashPass(pass, salt) };
+    raw.set('majlis_users', all);
+  } else {
+    const a = all[uid];
+    if (!a || await hashPass(pass, a.salt) !== a.hash) return err.textContent = 'الاسم أو كلمة السر غير صحيحة';
+  }
+  raw.set('majlis_lastUser', all[uid].user);
+  try{ sessionStorage.setItem('majlis_session', uid); }catch(e){}
+  F('lockPass').value = ''; F('lockPass2').value = '';
+  lock.classList.remove('show');
+  start(uid);
+};
+F('lockReset').onclick = async () => {
+  const user = F('lockUser').value.trim();
+  const all = users(), uid = uidOf(user || ' ');
+  if (!user || !all[uid]) return F('lockErr').textContent = 'اكتب اسم الحساب الذي نسيت كلمة سره';
+  if (!confirm('سيُحذف حساب «' + all[uid].user + '» بكل محادثاته ومفاتيحه. الحسابات الأخرى لا تتأثر. متأكد؟')) return;
+  const p = 'majlis_u_' + uid + '_';
+  const ids = [];
+  try{
+    for (let i = localStorage.length - 1; i >= 0; i--){
+      const k = localStorage.key(i);
+      if (k && k.startsWith(p)){
+        if (k.startsWith(p + 'majlis_chat_')) ids.push(...chatFileIds(raw.get(k, [])));
+        localStorage.removeItem(k);
+      }
+    }
+  }catch(e){}
+  await attDel(ids);
+  delete all[uid]; raw.set('majlis_users', all);
+  showLock(Object.keys(all).length ? 'login' : 'create');
+};
+document.getElementById('logout').onclick = () => {
+  try{ sessionStorage.removeItem('majlis_session'); }catch(e){}
+  location.reload();
+};
+
+let started = false;
+function start(uid){
+  if (started) return; started = true;
+  loadAccount(uid);
+  const acc = users()[uid];
+  F('whoami').textContent = acc ? '👤 ' + acc.user : '';
+  modeSel.value = S.mode;
+  updateTtsBtn(); setSendState(); renderAll(); renderChatList();
+  if (!S.claudeKey || !(S.geminiKey || S.orKey)) setTimeout(() => document.getElementById('openSettings').click(), 300);
+}
+let session = null;
+try{ session = sessionStorage.getItem('majlis_session'); }catch(e){}
+if (session && users()[session]) start(session); else showLock();
 </script>
 </body>
 </html>
