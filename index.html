@@ -184,15 +184,18 @@ function genConfig(model){
 
 async function geminiRequest(body, withConfig){
   if (!S.geminiKey) throw new Error('ضع مفتاح Gemini في الإعدادات ⚙️');
-  const models = [S.geminiModel, S.geminiModel, ...GEMINI_FALLBACKS.filter(m => m !== S.geminiModel)];
+  // نبدأ بآخر نموذج نجح خلال آخر 15 دقيقة، حتى لا نضيّع وقتاً على نموذج مزدحم
+  const sticky = store.get('majlis_gemini_ok', null);
+  const first = (sticky && Date.now() - sticky.t < 15*60*1000) ? sticky.m : S.geminiModel;
+  const models = [...new Set([first, S.geminiModel, ...GEMINI_FALLBACKS])];
   let lastErr = '';
   for (let i = 0; i < models.length; i++){
     const model = models[i];
     const payload = withConfig ? Object.assign({}, body, { generationConfig: genConfig(model) }) : body;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-    // مهلة 40 ثانية لكل محاولة، مع بقاء زر الإيقاف فعّالاً
+    // مهلة 20 ثانية لكل محاولة، مع بقاء زر الإيقاف فعّالاً
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort('timeout'), 40000);
+    const timer = setTimeout(() => ctl.abort('timeout'), 20000);
     const onStop = () => ctl.abort('stop');
     if (aborter) aborter.signal.addEventListener('abort', onStop);
     let r, d;
@@ -204,7 +207,7 @@ async function geminiRequest(body, withConfig){
       d = await r.json().catch(() => ({}));
     }catch(e){
       if (aborter && aborter.signal.aborted) throw e;      // المستخدم ضغط إيقاف
-      lastErr = `${model}: لم يرد خلال 40 ثانية`;
+      lastErr = `${model}: لم يرد خلال 20 ثانية`;
       continue;                                             // مهلة انتهت: جرّب النموذج التالي
     }finally{
       clearTimeout(timer);
@@ -213,12 +216,12 @@ async function geminiRequest(body, withConfig){
     if (r.ok){
       const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
       lastModel = model;
+      store.set('majlis_gemini_ok', { m:model, t:Date.now() });
       return parts.map(p => p.text || '').join('').trim();
     }
     lastErr = d.error && d.error.message || r.status;
     // ازدحام (503) أو حد الاستخدام (429) أو نموذج غير موجود (404): نجرب التالي
     if (![429, 500, 503, 404].includes(r.status)) break;
-    if (i === 0) await sleep(2000);   // محاولة ثانية لنفس النموذج بعد ثانيتين
   }
   throw new Error('Gemini: ' + lastErr);
 }
