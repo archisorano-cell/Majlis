@@ -295,7 +295,8 @@ async function speak(who, extra, isSummary){
     const sys = systemPrompt(who);
     const text = who === 'claude' ? await callClaude(turns, sys) : await callGemini(turns, sys);
     typing.remove();
-    if (!text) throw new Error(LABEL[who] + ': رد فارغ');
+    // رد فارغ أو [تم] = لا يوجد شيء جديد يضيفه: نتجاوزه بهدوء وننهي النقاش
+    if (!text || /^\[?\s*تم\s*\]?\.?$/.test(text)) return 'done';
     const m = { who, text, ts:Date.now(), model: who === 'claude' ? S.claudeModel : lastModel };
     if (isSummary) m.summary = true;
     history.push(m); saveAll();
@@ -340,18 +341,23 @@ async function send(){
     } else {
       const a = nextFirst, b = other(a);
       nextFirst = b; saveAll();   // نبدّل من يبدأ كل مرة حتى لا يتأثر أحد دائماً بالآخر
-      if (S.mode === 'debate'){
+      // الرسائل القصيرة (تمام، شكراً، اسكتوا...) لا تحتاج نقاشاً
+      const isShort = text.replace(/\s+/g,' ').length < 25;
+      const EXIT = ' إذا لم يكن عندك شيء جديد ومفيد تضيفه، أو طلب المستخدم التوقف، اكتب فقط: [تم]';
+      if (S.mode === 'debate' && !isShort){
         const rounds = Math.max(1, Math.min(5, +S.rounds || 2));
-        for (let r = 0; r < rounds && !stopRequested; r++){
-          await speak(a, r > 0 ? `هذه الجولة ${r+1} من النقاش: رد مباشرة على آخر ما قاله ${LABEL[b]}، طوّر الفكرة أو انتقدها.` : null);
+        let ended = false;
+        for (let r = 0; r < rounds && !stopRequested && !ended; r++){
+          if (await speak(a, r > 0 ? `هذه الجولة ${r+1} من النقاش: رد مباشرة على آخر ما قاله ${LABEL[b]}، طوّر الفكرة أو انتقدها.` + EXIT : null) === 'done') { ended = true; break; }
           if (stopRequested) break;
-          await speak(b, `هذه جولة نقاش: رد مباشرة على ما قاله ${LABEL[a]}، وافق أو خالف مع السبب، وطوّر الفكرة.`);
+          if (await speak(b, `هذه جولة نقاش: رد مباشرة على ما قاله ${LABEL[a]}، وافق أو خالف مع السبب، وطوّر الفكرة.` + EXIT) === 'done') { ended = true; break; }
         }
         if (!stopRequested)
           await speak(a, 'انتهت جولات النقاش. اكتب الآن للمستخدم الخلاصة النهائية: أفضل فكرة توصلنا لها، نقاط الاتفاق، وأي خلاف بقي بينكما مع رأي كل طرف. بإيجاز ووضوح.', true);
       } else {
-        await speak(a);
-        if (!stopRequested) await speak(b);
+        const shortNote = isShort ? 'رسالة المستخدم قصيرة: رد بإيجاز شديد.' + EXIT : null;
+        await speak(a, shortNote);
+        if (!stopRequested) await speak(b, shortNote);
       }
     }
   }catch(e){ /* الخطأ ظاهر في الشات */ }
