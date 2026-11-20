@@ -209,7 +209,11 @@
   <div class="orb" id="orb"></div>
   <div class="cstate" id="callState">…</div>
   <div class="cline" id="callLine"></div>
-  <div class="cbtns">
+  <div class="cbtns" id="limitBtns" style="display:none">
+    <button id="limitGo" style="width:auto;border-radius:14px;padding:0 18px;font-size:16px;background:var(--claude);color:#1a1a1a;border-color:var(--claude)">كمّل</button>
+    <button id="limitEnd" style="width:auto;border-radius:14px;padding:0 18px;font-size:16px">إنهاء</button>
+  </div>
+  <div class="cbtns" id="callBtns">
     <button id="callMute" title="إيقاف الاستماع مؤقتاً">⏸</button>
     <button id="callEnd" class="end" title="إنهاء المكالمة">✕</button>
   </div>
@@ -573,16 +577,20 @@ async function readSSE(r, onData){
 }
 
 /* ===== عدّاد التكلفة ===== */
-let lastUsage = null;                     // استهلاك آخر طلب: { inTok, outTok, usd, est, free }
+let lastUsage = null;
+let liveUsage = {};                       // ما وصل من الاستهلاك أثناء الرد (للردود المقطوعة)                     // استهلاك آخر طلب: { inTok, outTok, usd, est, free }
 const monthKey = () => new Date().toISOString().slice(0, 7);
 async function loadPrices(force){
   const c = store.get('majlis_prices', null);
-  if (c && !force && Date.now() - c.t < 24*3600*1000) return c.p;
+  if (c && c.v === 2 && !force && Date.now() - c.t < 24*3600*1000) return c.p;
   try{
     const r = await fetch('https://openrouter.ai/api/v1/models');
     const d = await r.json(); const p = {};
-    for (const m of d.data || []) if (m.pricing) p[m.id] = { i: +m.pricing.prompt || 0, o: +m.pricing.completion || 0 };
-    if (Object.keys(p).length) store.set('majlis_prices', { t: Date.now(), p });
+    for (const m of d.data || []) if (m.pricing) p[m.id] = { i: +m.pricing.prompt || 0, o: +m.pricing.completion || 0,
+      // أسعار الكاش كما تنشرها OpenRouter (إن وُجدت)، بدون أرقام ثابتة في الكود
+      cr: m.pricing.input_cache_read != null ? +m.pricing.input_cache_read : null,
+      cw: m.pricing.input_cache_write != null ? +m.pricing.input_cache_write : null };
+    if (Object.keys(p).length) store.set('majlis_prices', { t: Date.now(), v: 2, p });
     return p;
   }catch(e){ return c ? c.p : {}; }
 }
@@ -598,6 +606,12 @@ function priceFor(modelId){
 function estimateUsd(modelId, inTok, outTok){
   const pr = priceFor(modelId);
   return pr ? (inTok || 0) * pr.i + (outTok || 0) * pr.o : null;
+}
+/* تكلفة Claude: الدخول العادي + كتابة الكاش + قراءة الكاش كل واحد بسعره، والخروج */
+function claudeUsd(inBase, cacheWrite, cacheRead, outTok){
+  const pr = priceFor('anthropic/' + S.claudeModel); if (!pr) return null;
+  const cw = pr.cw != null ? pr.cw : pr.i, cr = pr.cr != null ? pr.cr : pr.i;   // إذا لم تنشر OpenRouter سعر الكاش نستعمل سعر الدخول
+  return (inBase || 0) * pr.i + (cacheWrite || 0) * cw + (cacheRead || 0) * cr + (outTok || 0) * pr.o;
 }
 function addSpend(kind, usd){
   if (!usd || !isFinite(usd)) return;
@@ -630,13 +644,16 @@ async function callClaude(turns, system, onDelta){
     const d = await r.json().catch(() => ({}));
     throw new Error('Claude: ' + (d.error && d.error.message || r.status));
   }
-  let text = '', inTok = 0, outTok = 0;
+  liveUsage.respOk = true;
+  let text = '', inTok = 0, outTok = 0, inBase = 0, cw = 0, cr = 0;
   await readSSE(r, ev => {
     if (ev.type === 'message_start' && ev.message && ev.message.usage){
       const u = ev.message.usage;
-      inTok = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+      inBase = u.input_tokens || 0; cw = u.cache_creation_input_tokens || 0; cr = u.cache_read_input_tokens || 0;
+      inTok = inBase + cw + cr;
+      Object.assign(liveUsage, { inBase, cw, cr, inKnown: true });
     }
-    if (ev.type === 'message_delta' && ev.usage) outTok = ev.usage.output_tokens || outTok;
+    if (ev.type === 'message_delta' && ev.usage){ outTok = ev.usage.output_tokens || outTok; liveUsage.out = outTok; }
     if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta'){
       text += ev.delta.text; if (onDelta) onDelta(text);
     } else if (ev.type === 'error'){
@@ -644,7 +661,7 @@ async function callClaude(turns, system, onDelta){
     }
   });
   // Anthropic ترجّع عدد التوكنز الفعلي، والسعر من قائمة OpenRouter (تقدير)
-  lastUsage = { inTok, outTok, usd: estimateUsd('anthropic/' + S.claudeModel, inTok, outTok), est: true };
+  lastUsage = { inTok, outTok, usd: claudeUsd(inBase, cw, cr, outTok), est: true, cw, cr };
   return text.trim();
 }
 
@@ -729,6 +746,7 @@ async function callOpenRouter(turns, system, onDelta){
   }
   let text = '';
   lastModel = model.replace(/^google\//, '');
+  liveUsage.respOk = true; liveUsage.model = model;
   await readSSE(r, ev => {
     if (ev.error){ const e = new Error('OpenRouter: ' + (ev.error.message || 'خطأ')); e.isApiError = true; throw e; }
     if (ev.model) lastModel = ev.model.replace(/^google\//, '');
@@ -802,7 +820,10 @@ function appendCost(div, m){
   div.appendChild(el);
   return div;
 }
-function chatSpend(){ return history.reduce((a, m) => a + (m.cost && m.cost.usd || 0), 0); }
+function chatSpend(){
+  const c = chats.find(c => c.id === currentId);
+  return history.reduce((a, m) => a + (m.cost && m.cost.usd || 0), 0) + (c && c.extra || 0);
+}
 function updateCostUI(){
   const el = document.getElementById('chatCost'); if (!el) return;
   const v = chatSpend();
@@ -814,17 +835,21 @@ let busy = false, stopRequested = false, aborter = null;
 
 async function speak(who, extra, isSummary){
   const typing = bubble(who, '…يكتب', 'typing');
-  typingEl = typing; lastModel = ''; lastUsage = null;
+  typingEl = typing; lastModel = ''; lastUsage = null; liveUsage = {};
+  let promptChars = 0, partialText = '', attCount = 0, sent = false;
   aborter = new AbortController();
   try{
     const CALL_NOTE = 'أنت الآن في مكالمة صوتية: رد بجملتين إلى أربع جمل قصيرة بأسلوب كلام طبيعي، بدون قوائم أو عناوين أو رموز أو إيموجي.';
     const turns = await buildTurns(who, inCall ? (extra ? extra + '\n' + CALL_NOTE : CALL_NOTE) : extra);
     const sys = systemPrompt(who);
+    promptChars = sys.length + turns.reduce((a, t) => a + t.text.length, 0);
+    attCount = turns.reduce((a, t) => a + (t.atts ? t.atts.length : 0), 0);
     const cls = isSummary ? 'summary' : '';
     let live = null, spoken = 0;
     const isPass = t => /^\s*\[?\s*ت(م)?\s*\]?\.?\s*$/.test(t);
     // يظهر النص وهو يُكتب، ويبدأ الصوت مع أول جملة مكتملة
     const onDelta = t => {
+      partialText = t;
       if (isPass(t)) return;
       if (!live){ typing.remove(); live = bubble(who, '', cls); }
       const head = live.querySelector('.who');
@@ -840,6 +865,7 @@ async function speak(who, extra, isSummary){
         }
       }
     };
+    sent = true;
     const text = who === 'claude' ? await callClaude(turns, sys, onDelta) : await callGemini(turns, sys, onDelta);
     typing.remove();
     // التكلفة تُحسب حتى لو انسحب الطرف بـ[تم]، لأن الطلب نفسه مدفوع
@@ -860,11 +886,33 @@ async function speak(who, extra, isSummary){
     if (tail.trim()) sayTail(who, tail);
   }catch(e){
     typing.remove();
-    bubble('error', e.name === 'AbortError' ? '⏹ تم إيقاف النقاش' : '⚠️ ' + e.message);
+    // رد مقطوع: المزوّد يحاسب على الإدخال كاملاً وعلى ما وُلّد قبل الانقطاع
+    const pc = sent ? interruptedCost(who, e, promptChars, attCount, partialText) : null;
+    const note = pc ? ` · ≈ ${fmtUsd(pc)} محسوبة على هذا الرد المقطوع` : '';
+    bubble('error', (e.name === 'AbortError' ? '⏹ تم إيقاف النقاش' : '⚠️ ' + e.message) + note);
     throw e;
   }finally{
     aborter = null; typingEl = null;
   }
+}
+/* تقدير تكلفة الرد المقطوع (حد أعلى محافظ): الإدخال كاملاً + الخروج الذي وصل */
+function interruptedCost(who, e, promptChars, attCount, partialText){
+  // نحسب فقط إذا وصل الطلب للمزوّد: إيقاف من المستخدم، أو انقطاع بعد بدء الرد
+  if (!(e.name === 'AbortError' || liveUsage.respOk) || e.isApiError) return null;
+  if (who !== 'claude' && !S.orKey) return null;                 // مفتاح Google المجاني: صفر
+  const estIn = Math.ceil(promptChars / 2.5) + attCount * 1600;  // ~1600 توكن لكل صورة/ملف
+  const outTok = liveUsage.out || Math.ceil(partialText.length / 2.5);
+  let usd;
+  if (who === 'claude'){
+    usd = liveUsage.inKnown ? claudeUsd(liveUsage.inBase, liveUsage.cw, liveUsage.cr, outTok) : claudeUsd(estIn, 0, 0, outTok);
+  } else {
+    usd = estimateUsd(liveUsage.model || (inCall ? 'google/gemini-3.8-flash' : S.orModel), estIn, outTok);
+  }
+  if (!usd) return null;
+  addSpend(who === 'claude' ? 'claude' : 'gemini', usd);
+  const c = chats.find(c => c.id === currentId);
+  if (c){ c.extra = (c.extra || 0) + usd; store.set('majlis_chats', chats); updateCostUI(); }
+  return usd;
 }
 
 function detectTarget(text){
@@ -1294,6 +1342,7 @@ function listenOnce(){
     };
     const timer = setInterval(() => {
       if (!inCall || callPaused) return finish(true);
+      if (limitRatio() >= 1 && !callOverAck) return finish(true);     // تجاوز الحد: نرجع للسؤال
       an.getFloatTimeDomainData(buf);
       let sum = 0; for (const v of buf) sum += v * v;
       const rms = Math.sqrt(sum / buf.length);
@@ -1309,8 +1358,32 @@ function listenOnce(){
   });
 }
 
+/* تنبيه الحد الشهري بالصوت أثناء المكالمة (الشريط المرئي لا يفيد وأنت لا تنظر للشاشة) */
+let callWarned = false, callOverAck = false;
+const limitRatio = () => (+S.monthLimit > 0) ? monthSpend() / +S.monthLimit : 0;
+async function callLimitCheck(){
+  const r = limitRatio();
+  if (r >= 1 && !callOverAck){
+    stopSpeech();
+    callUI('paused', `تجاوزت حدّك الشهري: ≈ ${fmtUsd(monthSpend())} من ${fmtUsd(+S.monthLimit)}`);
+    F('callState').textContent = 'تجاوزت الحد، تكمّل؟';
+    F('limitBtns').style.display = 'flex'; F('callBtns').style.display = 'none';
+    deviceSay('claude', 'تجاوزت حدك الشهري. تكمل المكالمة؟');      // صوت الهاتف: مجاني ولا يخرج من الهاتف
+    const go = await new Promise(res => { F('limitGo').onclick = () => res(true); F('limitEnd').onclick = () => res(false); });
+    F('limitBtns').style.display = 'none'; F('callBtns').style.display = 'flex';
+    if (!go){ endCall(); return false; }
+    callOverAck = true; callWarned = true;
+  } else if (r >= 0.8 && !callWarned){
+    callWarned = true;
+    callUI('paused', `≈ ${fmtUsd(monthSpend())} من ${fmtUsd(+S.monthLimit)}`);
+    await deviceSay('claude', 'انتباه، اقتربت من حدك الشهري');
+  }
+  return inCall;
+}
 async function callLoop(){
+  callWarned = false; callOverAck = false;
   while (inCall){
+    if (!(await callLimitCheck())) break;
     if (callPaused){ callUI('paused'); await sleepMs(300); continue; }
     callUI('listen', '');
     const blob = await listenOnce();
