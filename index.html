@@ -694,11 +694,30 @@ micBtn.onclick = async () => {
 };
 
 async function transcribe(blob){
-  const wav = await blobToWav(blob);
+  const b64 = await toBase64(await blobToWav(blob));
+  // سياق آخر المحادثة يساعد على فهم الأسماء والمواضيع
+  const ctxt = history.slice(-4).map(m => `${LABEL[m.who]}: ${m.text.slice(0, 300)}`).join('\n');
+  const prompt = 'فرّغ هذا التسجيل الصوتي إلى نص عربي مكتوب. المتكلم عراقي ويتكلم باللهجة العراقية، وقد يذكر أسماء مثل كلاود (Claude) وجيمي/جيميناي (Gemini).'
+    + ' اكتب ما قاله بالضبط بلهجته، وصحّح فقط الكلمات التي سُمعت خطأً بوضوح حسب السياق. أعد النص فقط بدون أي شرح.'
+    + ' إذا لم يكن في التسجيل كلام واضح أعد نصاً فارغاً.'
+    + (ctxt ? '\n\nسياق آخر ما قيل في المحادثة (للمساعدة على الفهم فقط، لا تكتبه):\n' + ctxt : '');
+  if (S.orKey){
+    // عبر OpenRouter: نموذج أقوى وبدون ازدحام الطبقة المجانية
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', { method:'POST',
+      headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey, 'X-Title':'Majlis' },
+      body: JSON.stringify({ model:'google/gemini-3.8-flash', max_tokens:1000, reasoning:{ effort:'low' },
+        messages:[{ role:'user', content:[
+          { type:'input_audio', input_audio:{ data:b64, format:'wav' } },
+          { type:'text', text:prompt } ] }] }) });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok){
+      const m = d.choices && d.choices[0] && d.choices[0].message;
+      return (m && m.content || '').trim();
+    }
+    if (!S.geminiKey) throw new Error('OpenRouter: ' + (d.error && d.error.message || r.status));
+  }
   const t = await geminiRequest({ contents:[{ role:'user', parts:[
-    { inlineData:{ mimeType:'audio/wav', data: await toBase64(wav) } },
-    { text:'فرّغ هذا التسجيل الصوتي إلى نص مكتوب كما قيل حرفياً وبنفس اللهجة (غالباً عراقية). أعد النص فقط بدون أي شرح أو إضافة. إذا لم يكن فيه كلام واضح أعد نصاً فارغاً.' }
-  ]}]});
+    { inlineData:{ mimeType:'audio/wav', data:b64 } }, { text:prompt } ]}]});
   return (t || '').trim();
 }
 
@@ -794,7 +813,7 @@ async function synth(who, text){
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method:'POST', headers:{ 'content-type':'application/json', 'x-goog-api-key':S.geminiKey },
       body: JSON.stringify({
-        contents:[{ parts:[{ text: 'اقرأ النص التالي بصوت طبيعي ودافئ كأنك تتكلم في جلسة نقاش، بنفس لهجته:\n' + text }] }],
+        contents:[{ parts:[{ text }] }],
         generationConfig:{ responseModalities:['AUDIO'],
           speechConfig:{ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: voice } } } } })
     }).catch(() => null);
@@ -853,7 +872,7 @@ const speechDone = () => !ttsBusy && !ttsQueue.length && !(window.speechSynthesi
 const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
 async function startCall(){
-  if (!S.geminiKey) return bubble('error', '⚠️ وضع المكالمة يحتاج مفتاح Google (Gemini) لتحويل كلامك إلى نص');
+  if (!S.geminiKey && !S.orKey) return bubble('error', '⚠️ وضع المكالمة يحتاج مفتاح Google أو OpenRouter لتحويل كلامك إلى نص');
   try{ callStream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true } }); }
   catch(e){ return bubble('error', '⚠️ لا يمكن الوصول للمايكروفون: ' + e.message); }
   inCall = true; callPaused = false;
@@ -874,7 +893,7 @@ function endCall(){
   callEl.classList.remove('show');
 }
 
-/* يسجّل حتى تسكت ثانية ونصف بعد أن تبدأ الكلام */
+/* يسجّل حتى تسكت ثانيتين تقريباً بعد أن تبدأ الكلام */
 function listenOnce(){
   return new Promise(resolve => {
     const ctx = audioCtx();
@@ -900,7 +919,7 @@ function listenOnce(){
       const th = Math.max(0.015, noise * 2.5);
       if (rms > th){ loudMs += 100; quietMs = 0; if (loudMs >= 200) spoke = true; orb.classList.add('heard'); }
       else { quietMs += 100; loudMs = 0; orb.classList.remove('heard'); }
-      if (spoke && quietMs >= 1500) finish(false);
+      if (spoke && quietMs >= 1800) finish(false);
       if (total >= 60000) finish(false);                                   // حد أقصى دقيقة للمقطع الواحد
     }, 100);
     rec.start();
