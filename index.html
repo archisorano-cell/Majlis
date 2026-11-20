@@ -169,7 +169,7 @@
     <h3>✳ مجلس الثلاثة</h3>
     <button id="newChat">＋ محادثة جديدة</button>
     <div id="chatList"></div>
-    <div class="dfoot"><span class="u" id="whoami"></span><button id="logout">خروج</button></div>
+    <div class="dfoot"><span class="u" id="whoami"></span><button id="bioToggle">👆 البصمة</button><button id="logout">خروج</button></div>
   </div>
 </div>
 
@@ -183,6 +183,7 @@
     <input id="lockPass2" type="password" placeholder="أعد كلمة السر" autocomplete="new-password">
     <div class="err" id="lockErr"></div>
     <button type="submit" id="lockBtn">دخول</button>
+    <button type="button" id="lockBio" style="display:none;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--surface);cursor:pointer">👆 الدخول بالبصمة</button>
     <button type="button" class="reset" id="lockSwitch">إنشاء حساب جديد</button>
     <button type="button" class="reset" id="lockReset">نسيت كلمة السر؟ (يمسح بيانات هذا الحساب)</button>
   </form>
@@ -1121,6 +1122,51 @@ async function hashPass(pass, saltHex){
   const key = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveBits']);
   return hex(await crypto.subtle.deriveBits({ name:'PBKDF2', salt, iterations:150000, hash:'SHA-256' }, key, 256));
 }
+/* ===== البصمة (WebAuthn): قفل محلي يستعمل بصمة الهاتف ===== */
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const unb64u = s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0));
+async function bioAvailable(){
+  try{ return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); }
+  catch(e){ return false; }
+}
+async function bioEnroll(uid){
+  const all = users(), acc = all[uid]; if (!acc) return false;
+  try{
+    const cred = await navigator.credentials.create({ publicKey:{
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp:{ name:'مجلس الثلاثة' },
+      user:{ id: enc.encode(uid).slice(0, 64), name: acc.user, displayName: acc.user },
+      pubKeyCredParams:[{ type:'public-key', alg:-7 }, { type:'public-key', alg:-257 }],
+      authenticatorSelection:{ authenticatorAttachment:'platform', userVerification:'required', residentKey:'discouraged' },
+      timeout:60000 } });
+    acc.cred = b64u(cred.rawId); raw.set('majlis_users', all);
+    return true;
+  }catch(e){ return false; }
+}
+async function bioLogin(uid){
+  const acc = users()[uid]; if (!acc || !acc.cred) return false;
+  try{
+    await navigator.credentials.get({ publicKey:{
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials:[{ type:'public-key', id: unb64u(acc.cred) }],
+      userVerification:'required', timeout:60000 } });
+    return true;
+  }catch(e){ return false; }
+}
+function enterAs(uid){
+  raw.set('majlis_lastUser', users()[uid].user);
+  try{ sessionStorage.setItem('majlis_session', uid); }catch(e){}
+  touchActive(uid);
+  F('lockPass').value = ''; F('lockPass2').value = '';
+  lock.classList.remove('show');
+  start(uid);
+}
+/* الرجوع خلال 10 دقائق لا يحتاج قفل */
+function touchActive(uid){ raw.set('majlis_active', { uid: uid || (raw.get('majlis_active', {}) || {}).uid, t: Date.now() }); }
+document.addEventListener('visibilitychange', () => { if (started && currentUid) touchActive(currentUid); });
+setInterval(() => { if (started && currentUid && !document.hidden) touchActive(currentUid); }, 60000);
+let currentUid = null;
+
 /* الحسابات: { uid: { user, salt, hash } } — الاسم غير حساس لحالة الأحرف */
 const users = () => raw.get('majlis_users', {});
 const uidOf = name => 'u' + hex(enc.encode(name.trim().toLowerCase())).slice(0, 40);
@@ -1141,7 +1187,16 @@ function showLock(mode){
   const last = raw.get('majlis_lastUser', '');
   F('lockUser').value = create ? '' : last;
   lock.classList.add('show');
+  const lastAcc = !create && last ? users()[uidOf(last)] : null;
+  F('lockBio').style.display = lastAcc && lastAcc.cred ? '' : 'none';
+  if (lastAcc && lastAcc.cred) setTimeout(() => F('lockBio').click(), 300);
 }
+F('lockBio').onclick = async () => {
+  const uid = uidOf(F('lockUser').value || raw.get('majlis_lastUser', '') || ' ');
+  if (!users()[uid] || !users()[uid].cred) return F('lockErr').textContent = 'البصمة غير مفعلة لهذا الاسم، ادخل بكلمة السر';
+  if (await bioLogin(uid)) enterAs(uid);
+  else F('lockErr').textContent = 'لم تنجح البصمة، جرّب مرة أخرى أو ادخل بكلمة السر';
+};
 F('lockSwitch').onclick = () => showLock(lockMode === 'create' ? 'login' : 'create');
 F('lockForm').onsubmit = async e => {
   e.preventDefault();
@@ -1160,11 +1215,12 @@ F('lockForm').onsubmit = async e => {
     const a = all[uid];
     if (!a || await hashPass(pass, a.salt) !== a.hash) return err.textContent = 'الاسم أو كلمة السر غير صحيحة';
   }
-  raw.set('majlis_lastUser', all[uid].user);
-  try{ sessionStorage.setItem('majlis_session', uid); }catch(e){}
-  F('lockPass').value = ''; F('lockPass2').value = '';
-  lock.classList.remove('show');
-  start(uid);
+  // عرض تفعيل البصمة مرة واحدة بعد الدخول بكلمة السر
+  if (!all[uid].cred && !all[uid].bioAsked && await bioAvailable()){
+    const a2 = users(); a2[uid].bioAsked = true; raw.set('majlis_users', a2);
+    if (confirm('تفعيل الدخول بالبصمة لهذا الحساب؟')) await bioEnroll(uid);
+  }
+  enterAs(uid);
 };
 F('lockReset').onclick = async () => {
   const user = F('lockUser').value.trim();
@@ -1188,12 +1244,13 @@ F('lockReset').onclick = async () => {
 };
 document.getElementById('logout').onclick = () => {
   try{ sessionStorage.removeItem('majlis_session'); }catch(e){}
+  currentUid = null; raw.del('majlis_active');
   location.reload();
 };
 
 let started = false;
 function start(uid){
-  if (started) return; started = true;
+  if (started) return; started = true; currentUid = uid;
   loadAccount(uid);
   const acc = users()[uid];
   F('whoami').textContent = acc ? '👤 ' + acc.user : '';
@@ -1201,9 +1258,20 @@ function start(uid){
   updateTtsBtn(); setSendState(); renderAll(); renderChatList();
   if (!S.claudeKey || !(S.geminiKey || S.orKey)) setTimeout(() => document.getElementById('openSettings').click(), 300);
 }
+document.getElementById('bioToggle').onclick = async () => {
+  const all = users(), acc = all[currentUid]; if (!acc) return;
+  if (acc.cred){
+    if (confirm('إيقاف الدخول بالبصمة؟')){ delete acc.cred; raw.set('majlis_users', all); alert('تم إيقاف البصمة'); }
+  } else if (!(await bioAvailable())) alert('هذا الهاتف أو المتصفح لا يدعم البصمة هنا');
+  else alert(await bioEnroll(currentUid) ? 'تم تفعيل الدخول بالبصمة ✅' : 'لم يتم التفعيل');
+};
+
 let session = null;
 try{ session = sessionStorage.getItem('majlis_session'); }catch(e){}
-if (session && users()[session]) start(session); else showLock();
+const act = raw.get('majlis_active', null);
+if (session && users()[session]) start(session);
+else if (act && users()[act.uid] && Date.now() - act.t < 10*60*1000) enterAs(act.uid);
+else showLock();
 
 /* تسجيل التطبيق للتثبيت على الهاتف */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
