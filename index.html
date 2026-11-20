@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="theme-color" content="#14171c">
+<meta name="mobile-web-app-capable" content="yes">
+<title>مجلس الثلاثة</title>
+<style>
+  :root{
+    --bg:#14171c; --panel:#1c2027; --line:#2a2f38; --text:#e9ecf1; --muted:#8b93a1;
+    --user:#2b5d8a; --claude:#c96f4a; --gemini:#4a7fd9; --ok:#3fa36b; --err:#d0564b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;font-size:16px}
+  body{display:flex;flex-direction:column;height:100dvh}
+  header{display:flex;align-items:center;gap:8px;padding:10px 12px;
+    padding-top:calc(10px + env(safe-area-inset-top));background:var(--panel);border-bottom:1px solid var(--line)}
+  header h1{font-size:17px;margin:0;flex:1;white-space:nowrap}
+  select,button,input,textarea{font:inherit;color:inherit}
+  select{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:6px 8px}
+  .icon{background:none;border:none;font-size:22px;padding:4px 6px;cursor:pointer}
+  main{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+  .msg{max-width:88%;padding:10px 12px;border-radius:14px;line-height:1.6;word-wrap:break-word;white-space:normal}
+  .msg .who{font-size:12px;font-weight:700;margin-bottom:4px;opacity:.9}
+  .msg.user{align-self:flex-start;background:var(--user)}
+  .msg.claude{align-self:flex-end;background:var(--panel);border-right:4px solid var(--claude)}
+  .msg.claude .who{color:var(--claude)}
+  .msg.gemini{align-self:flex-end;background:var(--panel);border-right:4px solid var(--gemini)}
+  .msg.gemini .who{color:var(--gemini)}
+  .msg.summary{outline:1px dashed var(--ok)}
+  .msg.error{align-self:center;background:#3a1f1f;color:#ffd2cc;font-size:14px}
+  .msg.typing{opacity:.7;font-style:italic}
+  .note{align-self:center;color:var(--muted);font-size:13px;text-align:center;max-width:90%}
+  footer{display:flex;align-items:flex-end;gap:8px;padding:8px 10px;
+    padding-bottom:calc(8px + env(safe-area-inset-bottom));background:var(--panel);border-top:1px solid var(--line)}
+  textarea{flex:1;resize:none;max-height:140px;min-height:44px;background:var(--bg);
+    border:1px solid var(--line);border-radius:14px;padding:10px 12px;line-height:1.5}
+  .round{width:44px;height:44px;border-radius:50%;border:none;font-size:20px;flex:none;cursor:pointer}
+  #mic{background:var(--line)}
+  #mic.rec{background:var(--err);animation:pulse 1s infinite}
+  #send{background:var(--ok);color:#fff}
+  #send.stop{background:var(--err)}
+  @keyframes pulse{50%{opacity:.6}}
+  dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:16px;
+    width:min(94vw,460px);max-height:90dvh;padding:16px}
+  dialog::backdrop{background:rgba(0,0,0,.6)}
+  dialog h2{margin:0 0 12px;font-size:18px}
+  label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+  dialog input[type=text],dialog input[type=password],dialog input[type=number]{
+    width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:9px 10px;direction:ltr}
+  .row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:14px}
+  .btns{display:flex;gap:8px;margin-top:16px}
+  .btn{flex:1;padding:10px;border-radius:10px;border:none;background:var(--line);cursor:pointer}
+  .btn.primary{background:var(--ok);color:#fff}
+  .btn.danger{background:#5a2a2a}
+  .hint{font-size:12px;color:var(--muted);margin-top:4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>مجلس الثلاثة</h1>
+  <select id="mode" aria-label="طريقة الرد">
+    <option value="both">يردّان مرة</option>
+    <option value="debate">نقاش + خلاصة</option>
+  </select>
+  <button class="icon" id="ttsToggle" title="قراءة الردود بالصوت">🔇</button>
+  <button class="icon" id="openSettings" title="الإعدادات">⚙️</button>
+</header>
+
+<main id="chat"></main>
+
+<footer>
+  <button class="round" id="mic" title="تسجيل صوتي">🎙️</button>
+  <textarea id="input" rows="1" placeholder="اكتب… أو @Claude أو @Gemini لتوجيه السؤال لواحد"></textarea>
+  <button class="round" id="send" title="إرسال">➤</button>
+</footer>
+
+<dialog id="settings">
+  <h2>الإعدادات</h2>
+  <label>مفتاح Claude (من console.anthropic.com)</label>
+  <input type="password" id="claudeKey" autocomplete="off">
+  <label>مفتاح Gemini (من aistudio.google.com)</label>
+  <input type="password" id="geminiKey" autocomplete="off">
+  <label>نموذج Claude</label>
+  <input type="text" id="claudeModel">
+  <label>نموذج Gemini</label>
+  <input type="text" id="geminiModel">
+  <div class="hint">إذا ظهر خطأ «model not found» غيّر اسم النموذج هنا فقط.</div>
+  <label>عدد جولات النقاش (في وضع «نقاش + خلاصة»)</label>
+  <input type="number" id="rounds" min="1" max="5">
+  <div class="row"><input type="checkbox" id="autoSend"> <span>إرسال الرسالة الصوتية مباشرة بعد التسجيل</span></div>
+  <div class="hint">المفاتيح والمحادثات تُحفظ على هذا الهاتف فقط.</div>
+  <div class="btns">
+    <button class="btn primary" id="saveSettings">حفظ</button>
+    <button class="btn" id="closeSettings">إغلاق</button>
+  </div>
+  <div class="btns">
+    <button class="btn danger" id="clearChat">مسح المحادثة</button>
+  </div>
+</dialog>
+
+<script>
+/* ===== التخزين ===== */
+const store = {
+  get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
+  set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+};
+const DEFAULTS = { claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
+  geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
+let S = Object.assign({}, DEFAULTS, store.get('majlis_settings', {}));
+let history = store.get('majlis_history', []);
+let nextFirst = store.get('majlis_nextFirst', 'claude');
+const saveAll = () => { store.set('majlis_settings', S); store.set('majlis_history', history); store.set('majlis_nextFirst', nextFirst); };
+
+/* ===== الأسماء والتعليمات ===== */
+const LABEL = { user:'المستخدم', claude:'Claude', gemini:'Gemini' };
+const SHOWN = { user:'أنت', claude:'Claude', gemini:'Gemini' };
+const other = w => w === 'claude' ? 'gemini' : 'claude';
+
+function systemPrompt(me){
+  const o = LABEL[other(me)];
+  return `أنت ${LABEL[me]} في غرفة نقاش جماعية مع المستخدم ومع ${o}. هدف هذه الغرفة الوصول إلى أفضل فكرة في كل نقاش.
+اقرأ ما كتبه الطرف الآخر قبل الرد. لا تجامل ولا تكرر ما قيل؛ إذا اختلفت فاذكر السبب مباشرة، وإذا اتفقت فأضف زاوية جديدة أو خطوة عملية.
+اجعل ردودك قصيرة ومركزة كأننا في جلسة عصف ذهني حية.
+رد بنفس لغة ولهجة المستخدم.
+الرسائل تصلك موسومة بأسماء أصحابها مثل [المستخدم] و[${o}]. لا تكتب وسم اسمك في بداية ردك، التطبيق يضيفه.
+لا تتكلم نيابةً عن ${o} ولا تكتب رده.`;
+}
+
+/* يحوّل السجل المشترك إلى أدوار يفهمها كل نموذج: رسائله = assistant، والباقي = user موسوم بالاسم */
+function buildTurns(me, extra){
+  const turns = [];
+  for (const m of history.slice(-60)){
+    const role = m.who === me ? 'assistant' : 'user';
+    const text = role === 'assistant' ? m.text : `[${LABEL[m.who]}]: ${m.text}`;
+    const last = turns[turns.length-1];
+    if (last && last.role === role) last.text += '\n\n' + text;
+    else turns.push({ role, text });
+  }
+  while (turns.length && turns[0].role === 'assistant') turns.shift();
+  if (extra){
+    const last = turns[turns.length-1];
+    if (last && last.role === 'user') last.text += '\n\n[ملاحظة من التطبيق]: ' + extra;
+    else turns.push({ role:'user', text:'[ملاحظة من التطبيق]: ' + extra });
+  }
+  return turns;
+}
+
+/* ===== الاتصال بالنماذج ===== */
+async function callClaude(turns, system){
+  if (!S.claudeKey) throw new Error('ضع مفتاح Claude في الإعدادات ⚙️');
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method:'POST', signal: aborter ? aborter.signal : undefined,
+    headers:{ 'content-type':'application/json', 'x-api-key':S.claudeKey,
+      'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+    body: JSON.stringify({ model:S.claudeModel, max_tokens:1500, system,
+      messages: turns.map(t => ({ role:t.role, content:t.text })) })
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error('Claude: ' + (d.error && d.error.message || r.status));
+  return (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+}
+
+async function geminiRequest(body){
+  if (!S.geminiKey) throw new Error('ضع مفتاح Gemini في الإعدادات ⚙️');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.geminiModel)}:generateContent`;
+  const r = await fetch(url, { method:'POST', signal: aborter ? aborter.signal : undefined,
+    headers:{ 'content-type':'application/json', 'x-goog-api-key':S.geminiKey },
+    body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error('Gemini: ' + (d.error && d.error.message || r.status));
+  const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
+  return parts.map(p => p.text || '').join('').trim();
+}
+
+function callGemini(turns, system){
+  return geminiRequest({
+    systemInstruction:{ parts:[{ text:system }] },
+    contents: turns.map(t => ({ role: t.role === 'assistant' ? 'model' : 'user', parts:[{ text:t.text }] })),
+    // تفكير Gemini 3 يُحسب ضمن maxOutputTokens، فنخفّضه ونرفع السقف حتى لا ينقطع الرد
+    // thinkingLevel لنماذج Gemini 3 فقط؛ النماذج الأقدم (2.5) لا تقبله
+    generationConfig: /^gemini-[3-9]/.test(S.geminiModel)
+      ? { maxOutputTokens:4000, thinkingConfig:{ thinkingLevel:'low' } }
+      : { maxOutputTokens:4000 }
+  });
+}
+
+/* ===== الواجهة ===== */
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+
+function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmt(s){ return esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>'); }
+
+function bubble(who, text, cls){
+  const div = document.createElement('div');
+  div.className = 'msg ' + who + (cls ? ' ' + cls : '');
+  div.innerHTML = (who !== 'error' ? `<div class="who">${SHOWN[who] || ''}${cls==='summary' ? ' · الخلاصة' : ''}</div>` : '') + fmt(text);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+function renderAll(){
+  chat.innerHTML = '';
+  if (!history.length){
+    const n = document.createElement('div'); n.className = 'note';
+    n.innerHTML = 'أهلاً بك في مجلس الثلاثة 👋<br>اكتب فكرتك أو سجّلها بصوتك.<br>«يردّان مرة»: كل واحد يرد بالدور.<br>«نقاش + خلاصة»: يتناقشان فيما بينهما ثم يعطونك الخلاصة.';
+    chat.appendChild(n);
+  }
+  history.forEach(m => bubble(m.who, m.text, m.summary ? 'summary' : ''));
+}
+
+/* ===== منطق المحادثة ===== */
+let busy = false, stopRequested = false, aborter = null;
+
+async function speak(who, extra, isSummary){
+  const typing = bubble(who, '…يكتب', 'typing');
+  aborter = new AbortController();
+  try{
+    const turns = buildTurns(who, extra);
+    const sys = systemPrompt(who);
+    const text = who === 'claude' ? await callClaude(turns, sys) : await callGemini(turns, sys);
+    typing.remove();
+    if (!text) throw new Error(LABEL[who] + ': رد فارغ');
+    const m = { who, text, ts:Date.now() };
+    if (isSummary) m.summary = true;
+    history.push(m); saveAll();
+    bubble(who, text, isSummary ? 'summary' : '');
+    say(who, text);
+  }catch(e){
+    typing.remove();
+    bubble('error', e.name === 'AbortError' ? '⏹ تم إيقاف النقاش' : '⚠️ ' + e.message);
+    throw e;
+  }finally{
+    aborter = null;
+  }
+}
+
+function detectTarget(text){
+  const t = text.toLowerCase();
+  const c = /@claude|@كلود/.test(t), g = /@gemini|@جيميناي|@جيمناي/.test(t);
+  if (c && !g) return 'claude';
+  if (g && !c) return 'gemini';
+  return null;
+}
+
+async function send(){
+  const text = input.value.trim();
+  if (!text || busy) return;
+  input.value = ''; autoGrow();
+  history.push({ who:'user', text, ts:Date.now() }); saveAll();
+  if (history.length === 1) renderAll(); else bubble('user', text);
+
+  busy = true; stopRequested = false; setSendState();
+  try{
+    const target = detectTarget(text);
+    if (target){
+      await speak(target);
+    } else {
+      const a = nextFirst, b = other(a);
+      nextFirst = b; saveAll();   // نبدّل من يبدأ كل مرة حتى لا يتأثر أحد دائماً بالآخر
+      if (S.mode === 'debate'){
+        const rounds = Math.max(1, Math.min(5, +S.rounds || 2));
+        for (let r = 0; r < rounds && !stopRequested; r++){
+          await speak(a, r > 0 ? `هذه الجولة ${r+1} من النقاش: رد مباشرة على آخر ما قاله ${LABEL[b]}، طوّر الفكرة أو انتقدها.` : null);
+          if (stopRequested) break;
+          await speak(b, `هذه جولة نقاش: رد مباشرة على ما قاله ${LABEL[a]}، وافق أو خالف مع السبب، وطوّر الفكرة.`);
+        }
+        if (!stopRequested)
+          await speak(a, 'انتهت جولات النقاش. اكتب الآن للمستخدم الخلاصة النهائية: أفضل فكرة توصلنا لها، نقاط الاتفاق، وأي خلاف بقي بينكما مع رأي كل طرف. بإيجاز ووضوح.', true);
+      } else {
+        await speak(a);
+        if (!stopRequested) await speak(b);
+      }
+    }
+  }catch(e){ /* الخطأ ظاهر في الشات */ }
+  busy = false; setSendState();
+}
+
+function setSendState(){
+  sendBtn.textContent = busy ? '■' : '➤';
+  sendBtn.classList.toggle('stop', busy);
+  sendBtn.title = busy ? 'إيقاف النقاش' : 'إرسال';
+}
+sendBtn.onclick = () => {
+  if (busy){ stopRequested = true; if (aborter) aborter.abort(); sendBtn.textContent = '…'; }
+  else send();
+};
+input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && window.matchMedia('(pointer:fine)').matches){ e.preventDefault(); send(); } });
+function autoGrow(){ input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px'; }
+input.addEventListener('input', autoGrow);
+
+/* ===== الصوت: تسجيل → Gemini يفرّغه إلى نص ===== */
+const micBtn = document.getElementById('mic');
+let recorder = null, chunks = [];
+
+micBtn.onclick = async () => {
+  if (recorder && recorder.state === 'recording'){ recorder.stop(); return; }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      micBtn.classList.remove('rec'); micBtn.textContent = '⏳'; micBtn.disabled = true;
+      try{
+        const wav = await blobToWav(new Blob(chunks, { type: recorder.mimeType }));
+        const text = await geminiRequest({ contents:[{ role:'user', parts:[
+          { inlineData:{ mimeType:'audio/wav', data: await toBase64(wav) } },
+          { text:'فرّغ هذا التسجيل الصوتي إلى نص مكتوب كما قيل حرفياً وبنفس اللهجة (غالباً عراقية). أعد النص فقط بدون أي شرح أو إضافة.' }
+        ]}]});
+        input.value = (input.value ? input.value + ' ' : '') + text; autoGrow();
+        if (S.autoSend && text) send(); else input.focus();
+      }catch(e){ bubble('error', '⚠️ التسجيل: ' + e.message); }
+      micBtn.textContent = '🎙️'; micBtn.disabled = false;
+    };
+    recorder.start();
+    micBtn.classList.add('rec'); micBtn.textContent = '⏹';
+  }catch(e){ bubble('error', '⚠️ لا يمكن الوصول للمايكروفون: ' + e.message); }
+};
+
+/* يحوّل التسجيل إلى WAV أحادي 16kHz لأن Gemini يقبله بثبات */
+async function blobToWav(blob){
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  const audio = await ctx.decodeAudioData(await blob.arrayBuffer());
+  ctx.close();
+  const rate = 16000, len = Math.max(1, Math.ceil(audio.duration * rate));
+  const off = new OfflineAudioContext(1, len, rate);
+  const src = off.createBufferSource(); src.buffer = audio; src.connect(off.destination); src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  const buf = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0,'RIFF'); v.setUint32(4, 36 + pcm.length*2, true); w(8,'WAVE'); w(12,'fmt ');
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  w(36,'data'); v.setUint32(40, pcm.length*2, true);
+  for (let i = 0; i < pcm.length; i++){ const s = Math.max(-1, Math.min(1, pcm[i])); v.setInt16(44 + i*2, s < 0 ? s*0x8000 : s*0x7fff, true); }
+  return new Blob([buf], { type:'audio/wav' });
+}
+async function toBase64(blob){
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+/* ===== قراءة الردود بالصوت (صوت مختلف لكل واحد) ===== */
+const ttsBtn = document.getElementById('ttsToggle');
+function updateTtsBtn(){ ttsBtn.textContent = S.tts ? '🔊' : '🔇'; }
+ttsBtn.onclick = () => { S.tts = !S.tts; saveAll(); updateTtsBtn(); if (!S.tts && window.speechSynthesis) speechSynthesis.cancel(); };
+function say(who, text){
+  if (!S.tts || !window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(text.replace(/[*#_`>\[\]]/g, ''));
+  const ar = speechSynthesis.getVoices().filter(v => /^ar/i.test(v.lang));
+  u.lang = 'ar';
+  if (ar.length) u.voice = who === 'claude' ? ar[0] : (ar[1] || ar[0]);
+  u.pitch = who === 'claude' ? 1.0 : 0.75;
+  u.rate = 1.0;
+  speechSynthesis.speak(u);
+}
+
+/* ===== الإعدادات ===== */
+const dlg = document.getElementById('settings');
+const F = id => document.getElementById(id);
+document.getElementById('openSettings').onclick = () => {
+  F('claudeKey').value = S.claudeKey; F('geminiKey').value = S.geminiKey;
+  F('claudeModel').value = S.claudeModel; F('geminiModel').value = S.geminiModel;
+  F('rounds').value = S.rounds; F('autoSend').checked = !!S.autoSend;
+  dlg.showModal();
+};
+F('closeSettings').onclick = () => dlg.close();
+F('saveSettings').onclick = () => {
+  S.claudeKey = F('claudeKey').value.trim(); S.geminiKey = F('geminiKey').value.trim();
+  S.claudeModel = F('claudeModel').value.trim() || DEFAULTS.claudeModel;
+  S.geminiModel = F('geminiModel').value.trim() || DEFAULTS.geminiModel;
+  S.rounds = +F('rounds').value || 2; S.autoSend = F('autoSend').checked;
+  saveAll(); dlg.close();
+};
+F('clearChat').onclick = () => { if (confirm('مسح كل المحادثة؟')){ history = []; saveAll(); renderAll(); dlg.close(); } };
+
+const modeSel = document.getElementById('mode');
+modeSel.value = S.mode;
+modeSel.onchange = () => { S.mode = modeSel.value; saveAll(); };
+
+updateTtsBtn(); setSendState(); renderAll();
+if (!S.claudeKey || !S.geminiKey) setTimeout(() => document.getElementById('openSettings').click(), 300);
+</script>
+</body>
+</html>
