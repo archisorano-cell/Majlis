@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="theme-color" content="#181818">
 <meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>مجلس الثلاثة</title>
 <style>
   /* أسلوب واجهة Claude بألوان أسود رصاصي */
@@ -926,6 +929,9 @@ function start(uid){
 let session = null;
 try{ session = sessionStorage.getItem('majlis_session'); }catch(e){}
 if (session && users()[session]) start(session); else showLock();
+
+/* تسجيل التطبيق للتثبيت على الهاتف */
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>
 </html>
