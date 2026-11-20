@@ -201,6 +201,12 @@
   <div class="chint">اضغط الدائرة لمقاطعة الكلام والتحدث</div>
 </div>
 
+<div id="bioBanner" style="display:none;margin:6px 14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);align-items:center;gap:10px">
+  <span style="flex:1;font-size:14px">👆 فعّل الدخول بالبصمة بدل كلمة السر</span>
+  <button id="bioYes" style="padding:8px 14px;border-radius:10px;border:none;background:var(--claude);color:#1a1a1a;font-weight:600;cursor:pointer">تفعيل</button>
+  <button id="bioNo" style="padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:none;cursor:pointer">لاحقاً</button>
+</div>
+
 <main id="chat"></main>
 
 <footer>
@@ -1215,11 +1221,6 @@ F('lockForm').onsubmit = async e => {
     const a = all[uid];
     if (!a || await hashPass(pass, a.salt) !== a.hash) return err.textContent = 'الاسم أو كلمة السر غير صحيحة';
   }
-  // عرض تفعيل البصمة مرة واحدة بعد الدخول بكلمة السر
-  if (!all[uid].cred && !all[uid].bioAsked && await bioAvailable()){
-    const a2 = users(); a2[uid].bioAsked = true; raw.set('majlis_users', a2);
-    if (confirm('تفعيل الدخول بالبصمة لهذا الحساب؟')) await bioEnroll(uid);
-  }
   enterAs(uid);
 };
 F('lockReset').onclick = async () => {
@@ -1249,8 +1250,25 @@ document.getElementById('logout').onclick = () => {
 };
 
 let started = false;
+async function maybeBioBanner(uid){
+  const acc = users()[uid];
+  if (!acc || acc.cred || acc.bioLater && Date.now() - acc.bioLater < 3*24*3600*1000) return;
+  if (!(await bioAvailable())) return;
+  document.getElementById('bioBanner').style.display = 'flex';
+}
+document.getElementById('bioYes').onclick = async () => {
+  // الضغط المباشر على الزر شرط حتى يفتح الهاتف نافذة البصمة
+  const ok = await bioEnroll(currentUid);
+  document.getElementById('bioBanner').style.display = 'none';
+  bubble('error', ok ? '✅ تم تفعيل الدخول بالبصمة' : '⚠️ لم يتم تفعيل البصمة. جرّب من القائمة ☰ ← 👆 البصمة');
+};
+document.getElementById('bioNo').onclick = () => {
+  const all = users(); if (all[currentUid]){ all[currentUid].bioLater = Date.now(); raw.set('majlis_users', all); }
+  document.getElementById('bioBanner').style.display = 'none';
+};
 function start(uid){
   if (started) return; started = true; currentUid = uid;
+  maybeBioBanner(uid);
   loadAccount(uid);
   const acc = users()[uid];
   F('whoami').textContent = acc ? '👤 ' + acc.user : '';
