@@ -73,7 +73,7 @@
 
 <footer>
   <button class="round" id="mic" title="تسجيل صوتي">🎙️</button>
-  <textarea id="input" rows="1" placeholder="اكتب… أو @Claude أو @Gemini لتوجيه السؤال لواحد"></textarea>
+  <textarea id="input" rows="1" placeholder="اكتب… واذكر «كلاود» أو «جيمي» لتوجيه السؤال لواحد"></textarea>
   <button class="round" id="send" title="إرسال">➤</button>
 </footer>
 
@@ -118,10 +118,16 @@ const saveAll = () => { store.set('majlis_settings', S); store.set('majlis_histo
 const LABEL = { user:'المستخدم', claude:'Claude', gemini:'Gemini' };
 const SHOWN = { user:'أنت', claude:'Claude', gemini:'Gemini' };
 const other = w => w === 'claude' ? 'gemini' : 'claude';
+const NICKS = { claude:'Claude أو كلاود أو كلود', gemini:'Gemini أو جيميناي أو جيمي أو جمناي' };
+const NAMES_RE = {
+  claude: /claude|كلاود|كلود|كلاد/,
+  gemini: /gemini|جيميناي|جيمناي|جمناي|جيمني|جميني|جيمي|جمني/
+};
 
 function systemPrompt(me){
   const o = LABEL[other(me)];
   return `أنت ${LABEL[me]} في غرفة نقاش جماعية مع المستخدم ومع ${o}. هدف هذه الغرفة الوصول إلى أفضل فكرة في كل نقاش.
+المستخدم قد يناديك باسمك بالعربي أو بالإنجليزي: ${NICKS[me]}. وينادي ${o} بـ: ${NICKS[other(me)]}. انتبه لمن يوجَّه الكلام.
 اقرأ ما كتبه الطرف الآخر قبل الرد. لا تجامل ولا تكرر ما قيل؛ إذا اختلفت فاذكر السبب مباشرة، وإذا اتفقت فأضف زاوية جديدة أو خطوة عملية.
 اجعل ردودك قصيرة ومركزة كأننا في جلسة عصف ذهني حية.
 رد بنفس لغة ولهجة المستخدم.
@@ -241,7 +247,8 @@ async function speak(who, extra, isSummary){
 
 function detectTarget(text){
   const t = text.toLowerCase();
-  const c = /@\s*(claude|كلود)/.test(t), g = /@\s*(gemini|جيميناي|جيمناي|جمناي)/.test(t);
+  // الاسم يكفي، مع @ أو بدونها، بالعربي أو بالإنجليزي
+  const c = NAMES_RE.claude.test(t), g = NAMES_RE.gemini.test(t);
   if (c && !g) return 'claude';
   if (g && !c) return 'gemini';
   return null;
