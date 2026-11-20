@@ -88,6 +88,11 @@
   <label>نموذج Gemini</label>
   <input type="text" id="geminiModel">
   <div class="hint">إذا ظهر خطأ «model not found» غيّر اسم النموذج هنا فقط.</div>
+  <label>مفتاح OpenRouter (اختياري — Gemini مدفوع بدون ازدحام)</label>
+  <input type="password" id="orKey" autocomplete="off">
+  <label>نموذج Gemini عبر OpenRouter</label>
+  <input type="text" id="orModel">
+  <div class="hint">إذا وضعت مفتاح OpenRouter، يرد Gemini عبره. اتركه فارغاً لتبقى على مفتاح Google المجاني.</div>
   <label>عدد جولات النقاش (في وضع «نقاش + خلاصة»)</label>
   <input type="number" id="rounds" min="1" max="5">
   <div class="row"><input type="checkbox" id="autoSend"> <span>إرسال الرسالة الصوتية مباشرة بعد التسجيل</span></div>
@@ -107,7 +112,7 @@ const store = {
   get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
   set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
 };
-const DEFAULTS = { claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
+const DEFAULTS = { orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
   geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
 let S = Object.assign({}, DEFAULTS, store.get('majlis_settings', {}));
 let history = store.get('majlis_history', []);
@@ -226,7 +231,24 @@ async function geminiRequest(body, withConfig){
   throw new Error('Gemini: ' + lastErr);
 }
 
+async function callOpenRouter(turns, system){
+  setStatus(`Gemini يكتب… (${S.orModel})`);
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method:'POST', signal: aborter ? aborter.signal : undefined,
+    headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
+      'X-Title':'Majlis' },
+    body: JSON.stringify({ model:S.orModel, max_tokens:4000,
+      messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content:t.text }))] })
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error('OpenRouter: ' + (d.error && d.error.message || r.status));
+  lastModel = (d.model || S.orModel).replace(/^google\//, '');
+  const msg = d.choices && d.choices[0] && d.choices[0].message;
+  return (msg && msg.content || '').trim();
+}
+
 function callGemini(turns, system){
+  if (S.orKey) return callOpenRouter(turns, system);
   return geminiRequest({
     systemInstruction:{ parts:[{ text:system }] },
     contents: turns.map(t => ({ role: t.role === 'assistant' ? 'model' : 'user', parts:[{ text:t.text }] }))
@@ -306,7 +328,7 @@ async function send(){
   busy = true; stopRequested = false; setSendState();
   try{
     const target = detectTarget(text);
-    const ready = ['claude','gemini'].filter(w => w === 'claude' ? S.claudeKey : S.geminiKey);
+    const ready = ['claude','gemini'].filter(w => w === 'claude' ? S.claudeKey : (S.geminiKey || S.orKey));
     if (target){
       await speak(target);
     } else if (ready.length < 2){
@@ -423,6 +445,7 @@ const dlg = document.getElementById('settings');
 const F = id => document.getElementById(id);
 document.getElementById('openSettings').onclick = () => {
   F('claudeKey').value = S.claudeKey; F('geminiKey').value = S.geminiKey;
+  F('orKey').value = S.orKey; F('orModel').value = S.orModel;
   F('claudeModel').value = S.claudeModel; F('geminiModel').value = S.geminiModel;
   F('rounds').value = S.rounds; F('autoSend').checked = !!S.autoSend;
   dlg.showModal();
@@ -430,6 +453,7 @@ document.getElementById('openSettings').onclick = () => {
 F('closeSettings').onclick = () => dlg.close();
 F('saveSettings').onclick = () => {
   S.claudeKey = F('claudeKey').value.trim(); S.geminiKey = F('geminiKey').value.trim();
+  S.orKey = F('orKey').value.trim(); S.orModel = F('orModel').value.trim() || DEFAULTS.orModel;
   S.claudeModel = F('claudeModel').value.trim() || DEFAULTS.claudeModel;
   S.geminiModel = F('geminiModel').value.trim() || DEFAULTS.geminiModel;
   S.rounds = +F('rounds').value || 2; S.autoSend = F('autoSend').checked;
@@ -443,7 +467,7 @@ modeSel.value = S.mode;
 modeSel.onchange = () => { S.mode = modeSel.value; saveAll(); };
 
 updateTtsBtn(); setSendState(); renderAll();
-if (!S.claudeKey || !S.geminiKey) setTimeout(() => document.getElementById('openSettings').click(), 300);
+if (!S.claudeKey || !(S.geminiKey || S.orKey)) setTimeout(() => document.getElementById('openSettings').click(), 300);
 </script>
 </body>
 </html>
