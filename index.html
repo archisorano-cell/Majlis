@@ -433,6 +433,7 @@ F('saveSettings').onclick = () => {
   S.claudeModel = F('claudeModel').value.trim() || DEFAULTS.claudeModel;
   S.geminiModel = F('geminiModel').value.trim() || DEFAULTS.geminiModel;
   S.rounds = +F('rounds').value || 2; S.autoSend = F('autoSend').checked;
+  store.set('majlis_gemini_ok', null);   // بعد تغيير الإعدادات نبدأ من النموذج المختار
   saveAll(); dlg.close();
 };
 F('clearChat').onclick = () => { if (confirm('مسح كل المحادثة؟')){ history = []; saveAll(); renderAll(); dlg.close(); } };
