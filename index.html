@@ -172,6 +172,8 @@ async function callClaude(turns, system){
 // نماذج احتياطية إذا كان النموذج الأساسي مزدحماً أو غير متاح
 const GEMINI_FALLBACKS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+let lastModel = '', typingEl = null;
+function setStatus(t){ if (typingEl) typingEl.lastChild.textContent = t; }
 
 function genConfig(model){
   // thinkingLevel لنماذج Gemini 3 فقط؛ النماذج الأقدم (2.5) لا تقبله
@@ -188,12 +190,29 @@ async function geminiRequest(body, withConfig){
     const model = models[i];
     const payload = withConfig ? Object.assign({}, body, { generationConfig: genConfig(model) }) : body;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-    const r = await fetch(url, { method:'POST', signal: aborter ? aborter.signal : undefined,
-      headers:{ 'content-type':'application/json', 'x-goog-api-key':S.geminiKey },
-      body: JSON.stringify(payload) });
-    const d = await r.json().catch(() => ({}));
+    // مهلة 40 ثانية لكل محاولة، مع بقاء زر الإيقاف فعّالاً
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort('timeout'), 40000);
+    const onStop = () => ctl.abort('stop');
+    if (aborter) aborter.signal.addEventListener('abort', onStop);
+    let r, d;
+    try{
+      setStatus(`Gemini يكتب… (${model})`);
+      r = await fetch(url, { method:'POST', signal: ctl.signal,
+        headers:{ 'content-type':'application/json', 'x-goog-api-key':S.geminiKey },
+        body: JSON.stringify(payload) });
+      d = await r.json().catch(() => ({}));
+    }catch(e){
+      if (aborter && aborter.signal.aborted) throw e;      // المستخدم ضغط إيقاف
+      lastErr = `${model}: لم يرد خلال 40 ثانية`;
+      continue;                                             // مهلة انتهت: جرّب النموذج التالي
+    }finally{
+      clearTimeout(timer);
+      if (aborter) aborter.signal.removeEventListener('abort', onStop);
+    }
     if (r.ok){
       const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
+      lastModel = model;
       return parts.map(p => p.text || '').join('').trim();
     }
     lastErr = d.error && d.error.message || r.status;
@@ -219,10 +238,11 @@ const sendBtn = document.getElementById('send');
 function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmt(s){ return esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>'); }
 
-function bubble(who, text, cls){
+function bubble(who, text, cls, model){
   const div = document.createElement('div');
   div.className = 'msg ' + who + (cls ? ' ' + cls : '');
-  div.innerHTML = (who !== 'error' ? `<div class="who">${SHOWN[who] || ''}${cls==='summary' ? ' · الخلاصة' : ''}</div>` : '') + fmt(text);
+  const tag = model ? ` <span style="font-weight:400;opacity:.6;font-size:11px">· ${esc(model.replace(/^gemini-|^claude-/,''))}</span>` : '';
+  div.innerHTML = (who !== 'error' ? `<div class="who">${SHOWN[who] || ''}${cls==='summary' ? ' · الخلاصة' : ''}${tag}</div>` : '') + fmt(text);
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   return div;
@@ -234,7 +254,7 @@ function renderAll(){
     n.innerHTML = 'أهلاً بك في مجلس الثلاثة 👋<br>اكتب فكرتك أو سجّلها بصوتك.<br>«يردّان مرة»: كل واحد يرد بالدور.<br>«نقاش + خلاصة»: يتناقشان فيما بينهما ثم يعطونك الخلاصة.';
     chat.appendChild(n);
   }
-  history.forEach(m => bubble(m.who, m.text, m.summary ? 'summary' : ''));
+  history.forEach(m => bubble(m.who, m.text, m.summary ? 'summary' : '', m.model));
 }
 
 /* ===== منطق المحادثة ===== */
@@ -242,6 +262,7 @@ let busy = false, stopRequested = false, aborter = null;
 
 async function speak(who, extra, isSummary){
   const typing = bubble(who, '…يكتب', 'typing');
+  typingEl = typing; lastModel = '';
   aborter = new AbortController();
   try{
     const turns = buildTurns(who, extra);
@@ -249,17 +270,17 @@ async function speak(who, extra, isSummary){
     const text = who === 'claude' ? await callClaude(turns, sys) : await callGemini(turns, sys);
     typing.remove();
     if (!text) throw new Error(LABEL[who] + ': رد فارغ');
-    const m = { who, text, ts:Date.now() };
+    const m = { who, text, ts:Date.now(), model: who === 'claude' ? S.claudeModel : lastModel };
     if (isSummary) m.summary = true;
     history.push(m); saveAll();
-    bubble(who, text, isSummary ? 'summary' : '');
+    bubble(who, text, isSummary ? 'summary' : '', m.model);
     say(who, text);
   }catch(e){
     typing.remove();
     bubble('error', e.name === 'AbortError' ? '⏹ تم إيقاف النقاش' : '⚠️ ' + e.message);
     throw e;
   }finally{
-    aborter = null;
+    aborter = null; typingEl = null;
   }
 }
 
