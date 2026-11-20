@@ -530,13 +530,32 @@ async function attClear(){
 }
 
 /* ===== الاتصال بالنماذج ===== */
-async function callClaude(turns, system){
+/* قراءة الرد المتدفق (Server-Sent Events) سطراً سطراً */
+async function readSSE(r, onData){
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = '';
+  for (;;){
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream:true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0){
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') return;
+      try{ onData(JSON.parse(data)); }catch(e){ if (e && e.isApiError) throw e; }
+    }
+  }
+}
+
+async function callClaude(turns, system, onDelta){
   if (!S.claudeKey) throw new Error('ضع مفتاح Claude في الإعدادات ⚙️');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'x-api-key':S.claudeKey,
       'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
-    body: JSON.stringify({ model:S.claudeModel, max_tokens: inCall ? 500 : 1500, system,
+    body: JSON.stringify({ model:S.claudeModel, max_tokens: inCall ? 500 : 1500, system, stream: true,
       messages: turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
         ? [ ...t.atts.map(a => a.mime === 'application/pdf'
               ? { type:'document', source:{ type:'base64', media_type:a.mime, data:a.data } }
@@ -544,9 +563,19 @@ async function callClaude(turns, system){
             { type:'text', text:t.text } ]
         : t.text })) })
   });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error('Claude: ' + (d.error && d.error.message || r.status));
-  return (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  if (!r.ok){
+    const d = await r.json().catch(() => ({}));
+    throw new Error('Claude: ' + (d.error && d.error.message || r.status));
+  }
+  let text = '';
+  await readSSE(r, ev => {
+    if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta'){
+      text += ev.delta.text; if (onDelta) onDelta(text);
+    } else if (ev.type === 'error'){
+      const e = new Error('Claude: ' + (ev.error && ev.error.message || 'خطأ')); e.isApiError = true; throw e;
+    }
+  });
+  return text.trim();
 }
 
 // نماذج احتياطية إذا كان النموذج الأساسي مزدحماً أو غير متاح
@@ -606,7 +635,7 @@ async function geminiRequest(body, withConfig){
   throw new Error('Gemini: ' + lastErr);
 }
 
-async function callOpenRouter(turns, system){
+async function callOpenRouter(turns, system, onDelta){
   // في المكالمة نستعمل Flash السريع بدل Pro حتى لا يطول الانتظار
   const model = inCall ? 'google/gemini-3.8-flash' : S.orModel;
   setStatus(`Gemini يكتب… (${model})`);
@@ -614,7 +643,7 @@ async function callOpenRouter(turns, system){
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
-    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 4000, reasoning:{ effort:'low' },
+    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 4000, reasoning:{ effort:'low' }, stream: true,
       messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
         ? [ ...t.atts.map(a => a.mime === 'application/pdf'
               ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
@@ -622,15 +651,23 @@ async function callOpenRouter(turns, system){
             { type:'text', text:t.text } ]
         : t.text }))] })
   });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error('OpenRouter: ' + (d.error && d.error.message || r.status));
-  lastModel = (d.model || model).replace(/^google\//, '');
-  const msg = d.choices && d.choices[0] && d.choices[0].message;
-  return (msg && msg.content || '').trim();
+  if (!r.ok){
+    const d = await r.json().catch(() => ({}));
+    throw new Error('OpenRouter: ' + (d.error && d.error.message || r.status));
+  }
+  let text = '';
+  lastModel = model.replace(/^google\//, '');
+  await readSSE(r, ev => {
+    if (ev.error){ const e = new Error('OpenRouter: ' + (ev.error.message || 'خطأ')); e.isApiError = true; throw e; }
+    if (ev.model) lastModel = ev.model.replace(/^google\//, '');
+    const c = ev.choices && ev.choices[0] && ev.choices[0].delta && ev.choices[0].delta.content;
+    if (c){ text += c; if (onDelta) onDelta(text); }
+  });
+  return text.trim();
 }
 
-function callGemini(turns, system){
-  if (S.orKey) return callOpenRouter(turns, system);
+function callGemini(turns, system, onDelta){
+  if (S.orKey) return callOpenRouter(turns, system, onDelta);
   return geminiRequest({
     systemInstruction:{ parts:[{ text:system }] },
     contents: turns.map(t => ({ role: t.role === 'assistant' ? 'model' : 'user',
@@ -689,15 +726,38 @@ async function speak(who, extra, isSummary){
     const CALL_NOTE = 'أنت الآن في مكالمة صوتية: رد بجملتين إلى أربع جمل قصيرة بأسلوب كلام طبيعي، بدون قوائم أو عناوين أو رموز أو إيموجي.';
     const turns = await buildTurns(who, inCall ? (extra ? extra + '\n' + CALL_NOTE : CALL_NOTE) : extra);
     const sys = systemPrompt(who);
-    const text = who === 'claude' ? await callClaude(turns, sys) : await callGemini(turns, sys);
+    const cls = isSummary ? 'summary' : '';
+    let live = null, spoken = 0;
+    const isPass = t => /^\s*\[?\s*ت(م)?\s*\]?\.?\s*$/.test(t);
+    // يظهر النص وهو يُكتب، ويبدأ الصوت مع أول جملة مكتملة
+    const onDelta = t => {
+      if (isPass(t)) return;
+      if (!live){ typing.remove(); live = bubble(who, '', cls); }
+      const head = live.querySelector('.who');
+      live.innerHTML = (head ? head.outerHTML : '') + fmt(t);
+      if (chat.scrollHeight - chat.scrollTop - chat.clientHeight < 160) chat.scrollTop = chat.scrollHeight;
+      if (S.tts){
+        // نُبقي آخر جملة مكتملة بلا قراءة حتى يصل ما بعدها، فلا تبقى نهاية قصيرة وحدها
+        const rest = t.slice(spoken), ends = [];
+        rest.replace(/[.!؟?…:\n](?=\s)/g, (x, i) => { ends.push(i + 1); return x; });
+        if (ends.length >= 2){
+          const cut = ends[ends.length - 2];
+          if (rest.slice(0, cut).trim().length >= (spoken === 0 ? 30 : 80)){ say(who, rest.slice(0, cut)); spoken += cut; }
+        }
+      }
+    };
+    const text = who === 'claude' ? await callClaude(turns, sys, onDelta) : await callGemini(turns, sys, onDelta);
     typing.remove();
     // رد فارغ أو [تم] = لا يوجد شيء جديد يضيفه: نتجاوزه بهدوء وننهي النقاش
-    if (!text || /^\[?\s*تم\s*\]?\.?$/.test(text)) return 'done';
+    if (!text || /^\[?\s*تم\s*\]?\.?$/.test(text)){ if (live) live.remove(); return 'done'; }
     const m = { who, text, ts:Date.now(), model: who === 'claude' ? S.claudeModel : lastModel };
     if (isSummary) m.summary = true;
     history.push(m); saveAll();
-    bubble(who, text, isSummary ? 'summary' : '', m.model);
-    say(who, text);
+    const fin = bubble(who, text, cls, m.model);
+    if (live){ live.replaceWith(fin); }
+    // باقي النص الذي لم يُقرأ بعد (أو كله إذا لم يكن الرد متدفقاً)
+    const tail = text.slice(Math.min(spoken, text.length));
+    if (tail.trim()) sayTail(who, tail);
   }catch(e){
     typing.remove();
     bubble('error', e.name === 'AbortError' ? '⏹ تم إيقاف النقاش' : '⚠️ ' + e.message);
@@ -901,6 +961,18 @@ function splitSpeech(t){
 function say(who, text){
   if (!S.tts) return;
   const segs = splitSpeech(cleanForSpeech(text));
+  segs.forEach(t => ttsQueue.push({ who, t, p:null, gen:ttsGen }));
+  pumpSpeech();
+}
+function sayTail(who, text){
+  if (!S.tts) return;
+  const segs = splitSpeech(cleanForSpeech(text));
+  if (!segs.length) return;
+  const last = ttsQueue[ttsQueue.length - 1];
+  // نهاية قصيرة تُلحق بالمقطع السابق إن لم يبدأ تجهيزه بعد (المقاطع القصيرة جداً قد تُرفض)
+  if (segs[0].length < 40 && last && last.who === who && !last.p && last.gen === ttsGen){
+    last.t += ' ' + segs.shift();
+  }
   segs.forEach(t => ttsQueue.push({ who, t, p:null, gen:ttsGen }));
   pumpSpeech();
 }
