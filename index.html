@@ -536,7 +536,7 @@ async function callClaude(turns, system){
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'x-api-key':S.claudeKey,
       'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
-    body: JSON.stringify({ model:S.claudeModel, max_tokens:1500, system,
+    body: JSON.stringify({ model:S.claudeModel, max_tokens: inCall ? 500 : 1500, system,
       messages: turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
         ? [ ...t.atts.map(a => a.mime === 'application/pdf'
               ? { type:'document', source:{ type:'base64', media_type:a.mime, data:a.data } }
@@ -607,12 +607,14 @@ async function geminiRequest(body, withConfig){
 }
 
 async function callOpenRouter(turns, system){
-  setStatus(`Gemini يكتب… (${S.orModel})`);
+  // في المكالمة نستعمل Flash السريع بدل Pro حتى لا يطول الانتظار
+  const model = inCall ? 'google/gemini-3.8-flash' : S.orModel;
+  setStatus(`Gemini يكتب… (${model})`);
   const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
-    body: JSON.stringify({ model:S.orModel, max_tokens:4000, reasoning:{ effort:'low' },
+    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 4000, reasoning:{ effort:'low' },
       messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
         ? [ ...t.atts.map(a => a.mime === 'application/pdf'
               ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
@@ -622,7 +624,7 @@ async function callOpenRouter(turns, system){
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error('OpenRouter: ' + (d.error && d.error.message || r.status));
-  lastModel = (d.model || S.orModel).replace(/^google\//, '');
+  lastModel = (d.model || model).replace(/^google\//, '');
   const msg = d.choices && d.choices[0] && d.choices[0].message;
   return (msg && msg.content || '').trim();
 }
@@ -684,7 +686,8 @@ async function speak(who, extra, isSummary){
   typingEl = typing; lastModel = '';
   aborter = new AbortController();
   try{
-    const turns = await buildTurns(who, extra);
+    const CALL_NOTE = 'أنت الآن في مكالمة صوتية: رد بجملتين إلى أربع جمل قصيرة بأسلوب كلام طبيعي، بدون قوائم أو عناوين أو رموز أو إيموجي.';
+    const turns = await buildTurns(who, inCall ? (extra ? extra + '\n' + CALL_NOTE : CALL_NOTE) : extra);
     const sys = systemPrompt(who);
     const text = who === 'claude' ? await callClaude(turns, sys) : await callGemini(turns, sys);
     typing.remove();
@@ -748,7 +751,7 @@ async function send(){
       // الرسائل القصيرة (تمام، شكراً، اسكتوا...) لا تحتاج نقاشاً
       const isShort = text.replace(/\s+/g,' ').length < 25;
       const EXIT = ' إذا لم يكن عندك شيء جديد ومفيد تضيفه، أو طلب المستخدم التوقف، اكتب فقط: [تم]';
-      if (S.mode === 'debate' && !isShort){
+      if (S.mode === 'debate' && !isShort && !inCall){   // في المكالمة: رد واحد لكل طرف حتى لا يطول
         const rounds = Math.max(1, Math.min(5, +S.rounds || 2));
         let ended = false;
         for (let r = 0; r < rounds && !stopRequested && !ended; r++){
@@ -879,7 +882,9 @@ function audioCtx(){
 }
 function cleanForSpeech(t){
   return t.replace(/```[\s\S]*?```/g, ' ').replace(/https?:\/\/\S+/g, ' ')
-          .replace(/[*#_`>|\[\]]/g, '').replace(/[ \t]+/g, ' ').trim();
+          .replace(/\p{Extended_Pictographic}|\uFE0F|\u200D/gu, '')
+          .replace(/[*#_`>|\[\]~^=<>{}\\/]/g, ' ').replace(/^[\s\-•–—]+/gm, '')
+          .replace(/[ \t]+/g, ' ').trim();
 }
 function splitSpeech(t){
   const parts = t.split(/(?<=[.!؟?\n…])\s+/).map(x => x.trim()).filter(Boolean);
@@ -889,7 +894,9 @@ function splitSpeech(t){
     if ((cur + ' ' + p).length > limit && cur){ out.push(cur); cur = p; } else cur = cur ? cur + ' ' + p : p;
   }
   if (cur) out.push(cur);
-  return out;
+  // جملة أخيرة قصيرة جداً تُدمج مع ما قبلها (مولّد الصوت يرفض المقاطع القصيرة أحياناً)
+  if (out.length > 1 && out[out.length - 1].length < 40) out[out.length - 2] += ' ' + out.pop();
+  return out.filter(x => /[\p{L}\p{N}]/u.test(x));
 }
 function say(who, text){
   if (!S.tts) return;
@@ -928,13 +935,19 @@ async function synth(who, text){
   if (S.orKey){
     const ok = store.get('majlis_ortts_ok', null);
     for (const model of [...new Set([ok, ...OR_TTS_MODELS].filter(Boolean))]){
-      const r = await fetch('https://openrouter.ai/api/v1/audio/speech', { method:'POST',
-        headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey, 'X-Title':'Majlis' },
-        body: JSON.stringify({ model, input:text, voice, response_format:'mp3' }) }).catch(() => null);
-      if (!r) break;
-      if (r.ok){ store.set('majlis_ortts_ok', model); return { buf: await r.arrayBuffer() }; }
-      if (![400, 404].includes(r.status)) break;
+      for (let attempt = 0; attempt < 2; attempt++){
+        const r = await fetch('https://openrouter.ai/api/v1/audio/speech', { method:'POST',
+          headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey, 'X-Title':'Majlis' },
+          body: JSON.stringify({ model, input:text, voice, response_format:'mp3' }) }).catch(() => null);
+        if (r && r.ok){
+          const buf = await r.arrayBuffer();
+          if (buf.byteLength > 1000){ store.set('majlis_ortts_ok', model); return { buf }; }
+        }
+        if (r && r.status === 404) break;                // نموذج غير موجود: جرّب التالي
+        await new Promise(z => setTimeout(z, 700));      // ازدحام أو خطأ مؤقت: إعادة محاولة
+      }
     }
+    return null;   // مع OpenRouter لا نرجع للطبقة المجانية حتى يبقى الصوت نفسه
   }
   if (S.ttsEngine === 'private' || !S.geminiKey) return null;
   const ok = store.get('majlis_tts_ok', null);
