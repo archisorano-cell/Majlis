@@ -201,6 +201,16 @@
   <label>عدد جولات النقاش (في وضع «نقاش + خلاصة»)</label>
   <input type="number" id="rounds" min="1" max="5">
   <div class="row"><input type="checkbox" id="autoSend"> <span>إرسال الرسالة الصوتية مباشرة بعد التسجيل</span></div>
+  <label>نوع الصوت عند قراءة الردود 🔊</label>
+  <select id="ttsEngine" style="width:100%;border-radius:10px">
+    <option value="gemini">أصوات Gemini الطبيعية (يحتاج مفتاح Google)</option>
+    <option value="device">صوت الهاتف</option>
+  </select>
+  <label>صوت Claude / صوت Gemini</label>
+  <div style="display:flex;gap:8px">
+    <select id="claudeVoice" style="flex:1;border-radius:10px"></select>
+    <select id="geminiVoice" style="flex:1;border-radius:10px"></select>
+  </div>
   <div class="hint">المفاتيح والمحادثات تُحفظ على هذا الهاتف فقط.</div>
   <div class="btns">
     <button class="btn primary" id="saveSettings">حفظ</button>
@@ -225,7 +235,7 @@ const store = {
   set(k, v){ raw.set(PFX + k, v); },
   del(k){ raw.del(PFX + k); }
 };
-const DEFAULTS = { orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
+const DEFAULTS = { ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
   geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
 let S = Object.assign({}, DEFAULTS);
 /* ===== المحادثات المحفوظة بأسماء (مثل Claude) ===== */
@@ -556,6 +566,7 @@ function detectTarget(text){
 async function send(){
   let text = input.value.trim();
   if ((!text && !pending.length) || busy) return;
+  stopSpeech(); if (S.tts) audioCtx();
   if (!text) text = pending.some(a => a.mime === 'application/pdf') ? 'شوفوا هذا الملف' : 'شوفوا هذه الصورة';
   input.value = ''; autoGrow();
   const atts = [];
@@ -627,6 +638,7 @@ let recorder = null, chunks = [];
 
 micBtn.onclick = async () => {
   if (recorder && recorder.state === 'recording'){ recorder.stop(); return; }
+  stopSpeech();
   try{
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
     chunks = [];
@@ -679,16 +691,112 @@ async function toBase64(blob){
 /* ===== قراءة الردود بالصوت (صوت مختلف لكل واحد) ===== */
 const ttsBtn = document.getElementById('ttsToggle');
 function updateTtsBtn(){ ttsBtn.textContent = S.tts ? '🔊' : '🔇'; }
-ttsBtn.onclick = () => { S.tts = !S.tts; saveAll(); updateTtsBtn(); if (!S.tts && window.speechSynthesis) speechSynthesis.cancel(); };
+ttsBtn.onclick = () => { S.tts = !S.tts; saveAll(); updateTtsBtn(); if (S.tts) audioCtx(); else stopSpeech(); };
+/* أصوات Gemini الطبيعية: النص يُقسم جملاً، تُولّد الجملة التالية أثناء تشغيل الحالية فيبدأ الكلام بسرعة */
+const VOICES = ['Orus','Kore','Puck','Charon','Fenrir','Aoede','Zephyr','Leda','Algenib','Sulafat'];
+const TTS_MODELS = ['gemini-3.8-flash-tts', 'gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts'];
+let ttsQueue = [], ttsBusy = false, ttsSource = null, ttsCtx = null, ttsGen = 0, ttsPauseUntil = 0;
+
+function audioCtx(){
+  if (!ttsCtx) ttsCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ttsCtx.state === 'suspended') ttsCtx.resume();
+  return ttsCtx;
+}
+function cleanForSpeech(t){
+  return t.replace(/```[\s\S]*?```/g, ' ').replace(/https?:\/\/\S+/g, ' ')
+          .replace(/[*#_`>|\[\]]/g, '').replace(/[ \t]+/g, ' ').trim();
+}
+function splitSpeech(t){
+  const parts = t.split(/(?<=[.!؟?\n…])\s+/).map(x => x.trim()).filter(Boolean);
+  const out = []; let cur = '';
+  for (const p of parts){
+    const limit = out.length === 0 ? 140 : 320;     // الجملة الأولى قصيرة ليبدأ الصوت بسرعة
+    if ((cur + ' ' + p).length > limit && cur){ out.push(cur); cur = p; } else cur = cur ? cur + ' ' + p : p;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 function say(who, text){
-  if (!S.tts || !window.speechSynthesis) return;
-  const u = new SpeechSynthesisUtterance(text.replace(/[*#_`>\[\]]/g, ''));
-  const ar = speechSynthesis.getVoices().filter(v => /^ar/i.test(v.lang));
-  u.lang = 'ar';
-  if (ar.length) u.voice = who === 'claude' ? ar[0] : (ar[1] || ar[0]);
-  u.pitch = who === 'claude' ? 1.0 : 0.75;
-  u.rate = 1.0;
-  speechSynthesis.speak(u);
+  if (!S.tts) return;
+  const segs = splitSpeech(cleanForSpeech(text));
+  segs.forEach(t => ttsQueue.push({ who, t, p:null, gen:ttsGen }));
+  pumpSpeech();
+}
+function stopSpeech(){
+  ttsGen++; ttsQueue = [];
+  try{ if (ttsSource) ttsSource.stop(); }catch(e){}
+  if (window.speechSynthesis) speechSynthesis.cancel();
+}
+function prefetch(){
+  ttsQueue.slice(0, 2).forEach(it => { if (!it.p) it.p = synth(it.who, it.t).catch(() => null); });
+}
+async function pumpSpeech(){
+  if (ttsBusy) return; ttsBusy = true;
+  while (ttsQueue.length){
+    prefetch();
+    const it = ttsQueue[0];
+    const pcm = await it.p;
+    if (it.gen !== ttsGen) break;
+    ttsQueue.shift(); prefetch();
+    if (pcm) await playPcm(pcm); else await deviceSay(it.who, it.t);
+  }
+  ttsBusy = false;
+  if (ttsQueue.length) pumpSpeech();
+}
+async function synth(who, text){
+  if (S.ttsEngine !== 'gemini' || !S.geminiKey) return null;
+  if (Date.now() < ttsPauseUntil) return null;       // بعد خطأ ازدحام/حد استخدام نستعمل صوت الهاتف 10 دقائق
+  const voice = who === 'claude' ? S.claudeVoice : S.geminiVoice;
+  const ok = store.get('majlis_tts_ok', null);
+  const models = [...new Set([ok, ...TTS_MODELS].filter(Boolean))];
+  for (const model of models){
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method:'POST', headers:{ 'content-type':'application/json', 'x-goog-api-key':S.geminiKey },
+      body: JSON.stringify({
+        contents:[{ parts:[{ text: 'اقرأ النص التالي بصوت طبيعي ودافئ كأنك تتكلم في جلسة نقاش، بنفس لهجته:\n' + text }] }],
+        generationConfig:{ responseModalities:['AUDIO'],
+          speechConfig:{ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: voice } } } } })
+    }).catch(() => null);
+    if (!r) return null;
+    if (r.ok){
+      const d = await r.json();
+      const part = (((d.candidates || [])[0] || {}).content || {}).parts || [];
+      const audio = part.find(x => x.inlineData);
+      if (audio){ store.set('majlis_tts_ok', model); return audio.inlineData.data; }
+      return null;
+    }
+    if (![404, 400].includes(r.status)){ ttsPauseUntil = Date.now() + 10*60*1000; return null; }
+  }
+  return null;
+}
+function playPcm(b64){
+  return new Promise(res => {
+    try{
+      const ctx = audioCtx();
+      const bin = atob(b64), n = bin.length >> 1, f = new Float32Array(n);
+      for (let i = 0; i < n; i++){
+        let v = bin.charCodeAt(2*i) | (bin.charCodeAt(2*i+1) << 8);
+        if (v >= 32768) v -= 65536;
+        f[i] = v / 32768;
+      }
+      const buf = ctx.createBuffer(1, n, 24000); buf.copyToChannel(f, 0);
+      const src = ctx.createBufferSource(); src.buffer = buf; src.connect(ctx.destination);
+      ttsSource = src; src.onended = () => { ttsSource = null; res(); };
+      src.start();
+    }catch(e){ res(); }
+  });
+}
+function deviceSay(who, text){
+  return new Promise(res => {
+    if (!window.speechSynthesis) return res();
+    const u = new SpeechSynthesisUtterance(text);
+    const ar = speechSynthesis.getVoices().filter(v => /^ar/i.test(v.lang));
+    u.lang = 'ar';
+    if (ar.length) u.voice = who === 'claude' ? ar[0] : (ar[1] || ar[0]);
+    u.pitch = who === 'claude' ? 1.0 : 0.8;
+    u.onend = u.onerror = () => res();
+    speechSynthesis.speak(u);
+  });
 }
 
 /* ===== المرفقات: صور و PDF ===== */
@@ -745,6 +853,11 @@ const F = id => document.getElementById(id);
 document.getElementById('openSettings').onclick = () => {
   F('claudeKey').value = S.claudeKey; F('geminiKey').value = S.geminiKey;
   F('orKey').value = S.orKey; F('orModel').value = S.orModel;
+  F('ttsEngine').value = S.ttsEngine;
+  for (const id of ['claudeVoice','geminiVoice']){
+    F(id).innerHTML = VOICES.map(v => `<option value="${v}">${(id === 'claudeVoice' ? 'Claude: ' : 'Gemini: ') + v}</option>`).join('');
+    F(id).value = S[id];
+  }
   F('claudeModel').value = S.claudeModel; F('geminiModel').value = S.geminiModel;
   F('rounds').value = S.rounds; F('autoSend').checked = !!S.autoSend;
   dlg.showModal();
@@ -753,6 +866,7 @@ F('closeSettings').onclick = () => dlg.close();
 F('saveSettings').onclick = () => {
   S.claudeKey = F('claudeKey').value.trim(); S.geminiKey = F('geminiKey').value.trim();
   S.orKey = F('orKey').value.trim(); S.orModel = F('orModel').value.trim() || DEFAULTS.orModel;
+  S.ttsEngine = F('ttsEngine').value; S.claudeVoice = F('claudeVoice').value; S.geminiVoice = F('geminiVoice').value;
   S.claudeModel = F('claudeModel').value.trim() || DEFAULTS.claudeModel;
   S.geminiModel = F('geminiModel').value.trim() || DEFAULTS.geminiModel;
   S.rounds = +F('rounds').value || 2; S.autoSend = F('autoSend').checked;
