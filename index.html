@@ -244,8 +244,9 @@
   <div class="row"><input type="checkbox" id="autoSend"> <span>إرسال الرسالة الصوتية مباشرة بعد التسجيل</span></div>
   <label>نوع الصوت عند قراءة الردود 🔊</label>
   <select id="ttsEngine" style="width:100%;border-radius:10px">
-    <option value="gemini">أصوات Gemini الطبيعية (يحتاج مفتاح Google)</option>
-    <option value="device">صوت الهاتف</option>
+    <option value="gemini">أصوات Gemini الطبيعية (عبر OpenRouter إن وُجد، وإلا مفتاح Google المجاني)</option>
+    <option value="private">أصوات Gemini عبر OpenRouter فقط (خصوصية أعلى)</option>
+    <option value="device">صوت الهاتف (لا يخرج النص من الهاتف)</option>
   </select>
   <label>صوت Claude / صوت Gemini</label>
   <div style="display:flex;gap:8px">
@@ -257,6 +258,12 @@
     <button class="btn primary" id="saveSettings">حفظ</button>
     <button class="btn" id="closeSettings">إغلاق</button>
   </div>
+  <label>النسخ الاحتياطي (ملف مشفر بكلمة سر تختارها)</label>
+  <div class="btns" style="margin-top:4px">
+    <button class="btn" id="backupBtn">⬇️ حفظ نسخة احتياطية</button>
+    <button class="btn" id="restoreBtn">⬆️ استرجاع</button>
+  </div>
+  <input type="file" id="restoreFile" accept=".majlis,application/json,application/octet-stream,*/*" hidden>
   <div class="btns">
     <button class="btn danger" id="clearChat">مسح المحادثة</button>
   </div>
@@ -271,28 +278,79 @@ const raw = {
   set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} },
   del(k){ try{ localStorage.removeItem(k); }catch(e){} }
 };
+/* ===== خزنة مشفرة: بيانات الحساب تُحفظ مشفرة (AES-256) ولا تُفك إلا بعد الدخول ===== */
+let DEK = null;                         // مفتاح تشفير بيانات الحساب (في الذاكرة فقط)
+const vault = new Map(), dirty = new Set();
+let flushTimer = null, flushing = Promise.resolve();
 const store = {
-  get(k, d){ return raw.get(PFX + k, d); },
-  set(k, v){ raw.set(PFX + k, v); },
-  del(k){ raw.del(PFX + k); }
+  get(k, d){ return vault.has(PFX + k) ? vault.get(PFX + k) : d; },
+  set(k, v){ vault.set(PFX + k, v); dirty.add(PFX + k); scheduleFlush(); },
+  del(k){ vault.delete(PFX + k); dirty.delete(PFX + k); raw.del(PFX + k); }
 };
+function scheduleFlush(){ clearTimeout(flushTimer); flushTimer = setTimeout(flushVault, 250); }
+function flushVault(){
+  flushing = flushing.then(async () => {
+    if (!DEK) return;
+    const keys = [...dirty]; dirty.clear();
+    for (const k of keys){
+      if (!vault.has(k)) continue;
+      try{ localStorage.setItem(k, await encStr(DEK, JSON.stringify(vault.get(k)))); }
+      catch(e){ dirty.add(k); }
+    }
+  });
+  return flushing;
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushVault(); });
+window.addEventListener('pagehide', () => flushVault());
+
+/* أدوات التشفير */
+const b64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function encBytes(key, bytes){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, bytes));
+  const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12); return b64(out);
+}
+async function decBytes(key, s){
+  const all = unb64(s);
+  return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv: all.slice(0, 12) }, key, all.slice(12)));
+}
+const encStr = async (key, str) => 'E1:' + await encBytes(key, new TextEncoder().encode(str));
+const decStr = async (key, s) => new TextDecoder().decode(await decBytes(key, s.slice(3)));
+const aesKey = rawBytes => crypto.subtle.importKey('raw', rawBytes, 'AES-GCM', false, ['encrypt','decrypt']);
+async function kekFromPass(pass, saltB64){
+  const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name:'PBKDF2', salt: unb64(saltB64), iterations:200000, hash:'SHA-256' },
+    k, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+}
+
+/* فتح الخزنة: فك تشفير كل بيانات الحساب إلى الذاكرة */
+async function openVault(uid, dek){
+  DEK = dek; PFX = 'majlis_u_' + uid + '_'; vault.clear(); dirty.clear();
+  // أول حساب يرث بيانات النسخ السابقة (المحادثة والمفاتيح)
+  if (!raw.get('majlis_migrated', false)){
+    for (const k of ['majlis_settings','majlis_nextFirst','majlis_gemini_ok','majlis_history']){
+      const v = localStorage.getItem(k); if (v !== null){ localStorage.setItem(PFX + k, v); raw.del(k); }
+    }
+    raw.set('majlis_migrated', true);
+  }
+  const keys = [];
+  for (let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); if (k && k.startsWith(PFX)) keys.push(k); }
+  for (const k of keys){
+    const v = localStorage.getItem(k);
+    try{
+      if (v.startsWith('E1:')) vault.set(k, JSON.parse(await decStr(dek, v)));
+      else { vault.set(k, JSON.parse(v)); dirty.add(k); }        // بيانات قديمة غير مشفرة: تُشفّر الآن
+    }catch(e){}
+  }
+  await flushVault();
+}
 const DEFAULTS = { ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
   geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
 let S = Object.assign({}, DEFAULTS);
 /* ===== المحادثات المحفوظة بأسماء (مثل Claude) ===== */
 let chats = [], currentId = null, history = [], nextFirst = 'claude';
 function loadAccount(uid){
-  PFX = 'majlis_u_' + uid + '_';
-  // أول حساب يُنشأ يرث بيانات النسخ السابقة (المحادثة والمفاتيح)
-  if (!raw.get('majlis_migrated', false)){
-    for (const k of ['majlis_settings','majlis_nextFirst','majlis_gemini_ok']){
-      const v = raw.get(k, null); if (v !== null){ raw.set(PFX + k, v); raw.del(k); }
-    }
-    const oldH = raw.get('majlis_history', null);
-    if (oldH && oldH.length){ raw.set(PFX + 'majlis_history', oldH); }
-    raw.del('majlis_history');
-    raw.set('majlis_migrated', true);
-  }
   S = Object.assign({}, DEFAULTS, store.get('majlis_settings', {}));
   chats = store.get('majlis_chats', []);          // [{ id, title, updated }]
   currentId = store.get('majlis_current', null);
@@ -390,21 +448,72 @@ let _db = null;
 function attDB(){
   if (_db) return _db;
   _db = new Promise((res, rej) => {
-    const r = indexedDB.open('majlis_files', 1);
-    r.onupgradeneeded = () => r.result.createObjectStore('files');
+    const r = indexedDB.open('majlis_files', 2);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains('files')) r.result.createObjectStore('files');
+      if (!r.result.objectStoreNames.contains('keys')) r.result.createObjectStore('keys');
+    };
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   });
   return _db;
 }
 async function attPut(id, data){
+  if (DEK) data = { e: await encStr(DEK, data) };       // الملفات تُحفظ مشفرة أيضاً
   const db = await attDB();
   return new Promise((res, rej) => { const tx = db.transaction('files','readwrite');
     tx.objectStore('files').put(data, id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
 }
 async function attGet(id){
   try{ const db = await attDB();
-    return await new Promise(res => { const q = db.transaction('files').objectStore('files').get(id);
+    const v = await new Promise(res => { const q = db.transaction('files').objectStore('files').get(id);
       q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); });
+    if (v && v.e) return DEK ? await decStr(DEK, v.e) : null;
+    return v;
+  }catch(e){ return null; }
+}
+async function attDelPrefix(prefix){
+  try{ const db = await attDB();
+    await new Promise(res => { const tx = db.transaction('files','readwrite');
+      tx.objectStore('files').delete(IDBKeyRange.bound(prefix, prefix + '\uffff')); tx.oncomplete = res; tx.onerror = res; });
+  }catch(e){}
+}
+/* مفتاح الجهاز: مفتاح تشفير لا يمكن نسخه خارج هذا الهاتف، يُستعمل للبصمة والرجوع السريع */
+async function devKey(uid, create){
+  const db = await attDB();
+  let k = await new Promise(res => { const q = db.transaction('keys').objectStore('keys').get(uid);
+    q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); });
+  if (!k && create){
+    k = await crypto.subtle.generateKey({ name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+    await new Promise(res => { const tx = db.transaction('keys','readwrite'); tx.objectStore('keys').put(k, uid); tx.oncomplete = res; tx.onerror = res; });
+  }
+  return k;
+}
+async function devKeyDel(uid){
+  try{ const db = await attDB();
+    await new Promise(res => { const tx = db.transaction('keys','readwrite'); tx.objectStore('keys').delete(uid); tx.oncomplete = res; tx.onerror = res; });
+  }catch(e){}
+}
+/* فتح مفتاح البيانات بكلمة السر (وإنشاؤه أول مرة) */
+async function unlockWithPass(uid, pass){
+  const all = users(), acc = all[uid];
+  let dekRaw;
+  if (!acc.wpw){
+    dekRaw = crypto.getRandomValues(new Uint8Array(32));
+    acc.ksalt = b64(crypto.getRandomValues(new Uint8Array(16)));
+    acc.wpw = await encBytes(await kekFromPass(pass, acc.ksalt), dekRaw);
+  } else {
+    dekRaw = await decBytes(await kekFromPass(pass, acc.ksalt), acc.wpw);
+  }
+  acc.wdev = await encBytes(await devKey(uid, true), dekRaw);
+  raw.set('majlis_users', all);
+  return aesKey(dekRaw);
+}
+/* فتح مفتاح البيانات بمفتاح الجهاز (بعد البصمة أو الرجوع السريع) */
+async function unlockWithDevice(uid){
+  try{
+    const acc = users()[uid]; if (!acc || !acc.wdev) return null;
+    const k = await devKey(uid, false); if (!k) return null;
+    return aesKey(await decBytes(k, acc.wdev));
   }catch(e){ return null; }
 }
 async function attDel(ids){
@@ -612,7 +721,7 @@ async function send(){
   input.value = ''; autoGrow();
   const atts = [];
   for (const a of pending){
-    const id = 'f' + Date.now() + Math.random().toString(36).slice(2, 7);
+    const id = currentUid + '_f' + Date.now() + Math.random().toString(36).slice(2, 7);
     try{ await attPut(id, a.data); atts.push({ id, mime:a.mime, name:a.name }); }
     catch(e){ bubble('error', '⚠️ تعذر حفظ المرفق: ' + a.name); }
   }
@@ -810,10 +919,24 @@ async function pumpSpeech(){
   ttsBusy = false;
   if (ttsQueue.length) pumpSpeech();
 }
+const OR_TTS_MODELS = ['google/gemini-3.8-flash-tts', 'google/gemini-3.1-flash-tts-preview'];
 async function synth(who, text){
-  if (S.ttsEngine !== 'gemini' || !S.geminiKey) return null;
+  if (S.ttsEngine === 'device') return null;
   if (Date.now() < ttsPauseUntil) return null;       // بعد خطأ ازدحام/حد استخدام نستعمل صوت الهاتف 10 دقائق
   const voice = who === 'claude' ? S.claudeVoice : S.geminiVoice;
+  // الأفضل: OpenRouter (مدفوع، لا يُستعمل لتدريب النماذج)
+  if (S.orKey){
+    const ok = store.get('majlis_ortts_ok', null);
+    for (const model of [...new Set([ok, ...OR_TTS_MODELS].filter(Boolean))]){
+      const r = await fetch('https://openrouter.ai/api/v1/audio/speech', { method:'POST',
+        headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey, 'X-Title':'Majlis' },
+        body: JSON.stringify({ model, input:text, voice, response_format:'mp3' }) }).catch(() => null);
+      if (!r) break;
+      if (r.ok){ store.set('majlis_ortts_ok', model); return { buf: await r.arrayBuffer() }; }
+      if (![400, 404].includes(r.status)) break;
+    }
+  }
+  if (S.ttsEngine === 'private' || !S.geminiKey) return null;
   const ok = store.get('majlis_tts_ok', null);
   const models = [...new Set([ok, ...TTS_MODELS].filter(Boolean))];
   for (const model of models){
@@ -837,6 +960,7 @@ async function synth(who, text){
   return null;
 }
 function playPcm(b64){
+  if (b64 && b64.buf) return playEncoded(b64.buf);
   return new Promise(res => {
     try{
       const ctx = audioCtx();
@@ -852,6 +976,16 @@ function playPcm(b64){
       src.start();
     }catch(e){ res(); }
   });
+}
+async function playEncoded(buf){
+  try{
+    const ctx = audioCtx();
+    const audio = await ctx.decodeAudioData(buf.slice(0));
+    await new Promise(res => {
+      const src = ctx.createBufferSource(); src.buffer = audio; src.connect(ctx.destination);
+      ttsSource = src; src.onended = () => { ttsSource = null; res(); }; src.start();
+    });
+  }catch(e){}
 }
 function deviceSay(who, text){
   return new Promise(res => {
@@ -1047,6 +1181,60 @@ const modeSel = document.getElementById('mode');
 
 modeSel.onchange = () => { S.mode = modeSel.value; saveAll(); };
 
+/* ===== النسخ الاحتياطي: كل المحادثات والملفات في ملف واحد مشفر ===== */
+F('backupBtn').onclick = async () => {
+  const pass = prompt('اختر كلمة سر لملف النسخة الاحتياطية (احفظها جيداً، بدونها لا يُفتح الملف):');
+  if (!pass) return;
+  if (pass.length < 6) return alert('كلمة السر قصيرة (6 أحرف على الأقل)');
+  if (prompt('أعد كتابة كلمة السر:') !== pass) return alert('كلمتا السر غير متطابقتين');
+  const withKeys = confirm('تضمين مفاتيح Claude وGemini وOpenRouter في النسخة؟\n(موافق = نعم، إلغاء = بدون مفاتيح)');
+  saveAll(); await flushVault();
+  const data = { app:'majlis', v:1, created: new Date().toISOString(), chats, chatData:{}, files:{} };
+  for (const c of chats){
+    const h = store.get('majlis_chat_' + c.id, []);
+    data.chatData[c.id] = h;
+    for (const a of h.flatMap(m => m.atts || [])){ const f = await attGet(a.id); if (f) data.files[a.id] = f; }
+  }
+  if (withKeys) data.keys = { claudeKey:S.claudeKey, geminiKey:S.geminiKey, orKey:S.orKey };
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+  const body = await encStr(await kekFromPass(pass, salt), JSON.stringify(data));
+  const file = new File([JSON.stringify({ majlisBackup:1, salt, data: body })],
+    'majlis-' + new Date().toISOString().slice(0, 10) + '.majlis', { type:'application/octet-stream' });
+  // المشاركة تتيح الحفظ مباشرة في Google Drive أو إرساله لنفسك
+  if (navigator.canShare && navigator.canShare({ files:[file] })){
+    try{ await navigator.share({ files:[file], title:'نسخة احتياطية - مجلس الثلاثة' }); return; }catch(e){ if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+F('restoreBtn').onclick = () => F('restoreFile').click();
+F('restoreFile').onchange = async () => {
+  const f = F('restoreFile').files[0]; F('restoreFile').value = '';
+  if (!f) return;
+  try{
+    const wrap = JSON.parse(await f.text());
+    if (!wrap.majlisBackup) throw new Error('هذا ليس ملف نسخة احتياطية للمجلس');
+    const pass = prompt('كلمة سر ملف النسخة الاحتياطية:'); if (!pass) return;
+    let data;
+    try{ data = JSON.parse(await decStr(await kekFromPass(pass, wrap.salt), wrap.data)); }
+    catch(e){ throw new Error('كلمة السر غير صحيحة أو الملف تالف'); }
+    let n = 0;
+    for (const c of data.chats || []){
+      const id = 'c' + Date.now() + '_' + (n++);
+      const h = data.chatData[c.id] || [];
+      for (const m of h) for (const a of (m.atts || [])){
+        const fd = data.files[a.id]; const nid = currentUid + '_r' + Date.now() + Math.random().toString(36).slice(2, 7);
+        if (fd){ await attPut(nid, fd); a.id = nid; }
+      }
+      store.set('majlis_chat_' + id, h);
+      chats.push({ id, title: c.title, updated: c.updated || Date.now(), named: true });
+    }
+    if (data.keys){ for (const k of ['claudeKey','geminiKey','orKey']) if (!S[k] && data.keys[k]) S[k] = data.keys[k]; }
+    saveAll(); renderChatList();
+    alert('تم استرجاع ' + n + ' محادثة ✅');
+  }catch(e){ alert('⚠️ ' + e.message); }
+};
+
 /* ===== قائمة المحادثات ===== */
 const drawer = document.getElementById('drawer');
 const chatList = document.getElementById('chatList');
@@ -1159,13 +1347,16 @@ async function bioLogin(uid){
     return true;
   }catch(e){ return false; }
 }
-function enterAs(uid){
+async function enterAs(uid, dek){
+  dek = dek || await unlockWithDevice(uid);
+  if (!dek){ showLock('login'); F('lockUser').value = users()[uid] ? users()[uid].user : '';
+    F('lockErr').textContent = 'ادخل بكلمة السر مرة واحدة لفتح الخزنة'; return; }
   raw.set('majlis_lastUser', users()[uid].user);
   try{ sessionStorage.setItem('majlis_session', uid); }catch(e){}
   touchActive(uid);
   F('lockPass').value = ''; F('lockPass2').value = '';
   lock.classList.remove('show');
-  start(uid);
+  await start(uid, dek);
 }
 /* الرجوع خلال 10 دقائق لا يحتاج قفل */
 function touchActive(uid){ raw.set('majlis_active', { uid: uid || (raw.get('majlis_active', {}) || {}).uid, t: Date.now() }); }
@@ -1200,7 +1391,7 @@ function showLock(mode){
 F('lockBio').onclick = async () => {
   const uid = uidOf(F('lockUser').value || raw.get('majlis_lastUser', '') || ' ');
   if (!users()[uid] || !users()[uid].cred) return F('lockErr').textContent = 'البصمة غير مفعلة لهذا الاسم، ادخل بكلمة السر';
-  if (await bioLogin(uid)) enterAs(uid);
+  if (await bioLogin(uid)) enterAs(uid);   // يفك الخزنة بمفتاح الجهاز
   else F('lockErr').textContent = 'لم تنجح البصمة، جرّب مرة أخرى أو ادخل بكلمة السر';
 };
 F('lockSwitch').onclick = () => showLock(lockMode === 'create' ? 'login' : 'create');
@@ -1221,7 +1412,10 @@ F('lockForm').onsubmit = async e => {
     const a = all[uid];
     if (!a || await hashPass(pass, a.salt) !== a.hash) return err.textContent = 'الاسم أو كلمة السر غير صحيحة';
   }
-  enterAs(uid);
+  F('lockBtn').disabled = true;
+  try{ await enterAs(uid, await unlockWithPass(uid, pass)); }
+  catch(e2){ err.textContent = 'تعذر فتح الخزنة: ' + e2.message; }
+  F('lockBtn').disabled = false;
 };
 F('lockReset').onclick = async () => {
   const user = F('lockUser').value.trim();
@@ -1229,23 +1423,20 @@ F('lockReset').onclick = async () => {
   if (!user || !all[uid]) return F('lockErr').textContent = 'اكتب اسم الحساب الذي نسيت كلمة سره';
   if (!confirm('سيُحذف حساب «' + all[uid].user + '» بكل محادثاته ومفاتيحه. الحسابات الأخرى لا تتأثر. متأكد؟')) return;
   const p = 'majlis_u_' + uid + '_';
-  const ids = [];
   try{
     for (let i = localStorage.length - 1; i >= 0; i--){
       const k = localStorage.key(i);
-      if (k && k.startsWith(p)){
-        if (k.startsWith(p + 'majlis_chat_')) ids.push(...chatFileIds(raw.get(k, [])));
-        localStorage.removeItem(k);
-      }
+      if (k && k.startsWith(p)) localStorage.removeItem(k);
     }
   }catch(e){}
-  await attDel(ids);
+  await attDelPrefix(uid + '_'); await devKeyDel(uid);
   delete all[uid]; raw.set('majlis_users', all);
   showLock(Object.keys(all).length ? 'login' : 'create');
 };
-document.getElementById('logout').onclick = () => {
+document.getElementById('logout').onclick = async () => {
   try{ sessionStorage.removeItem('majlis_session'); }catch(e){}
   currentUid = null; raw.del('majlis_active');
+  await flushVault(); DEK = null;
   location.reload();
 };
 
@@ -1266,8 +1457,9 @@ document.getElementById('bioNo').onclick = () => {
   const all = users(); if (all[currentUid]){ all[currentUid].bioLater = Date.now(); raw.set('majlis_users', all); }
   document.getElementById('bioBanner').style.display = 'none';
 };
-function start(uid){
+async function start(uid, dek){
   if (started) return; started = true; currentUid = uid;
+  await openVault(uid, dek);
   maybeBioBanner(uid);
   loadAccount(uid);
   const acc = users()[uid];
@@ -1287,7 +1479,7 @@ document.getElementById('bioToggle').onclick = async () => {
 let session = null;
 try{ session = sessionStorage.getItem('majlis_session'); }catch(e){}
 const act = raw.get('majlis_active', null);
-if (session && users()[session]) start(session);
+if (session && users()[session]) enterAs(session);
 else if (act && users()[act.uid] && Date.now() - act.t < 10*60*1000) enterAs(act.uid);
 else showLock();
 
