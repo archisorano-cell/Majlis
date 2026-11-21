@@ -253,6 +253,7 @@
       <button class="round" id="attach" title="إرفاق صورة أو PDF">+</button>
       <input type="file" id="fileInput" accept="image/*,application/pdf" multiple hidden>
       <button class="round" id="mic" title="تسجيل صوتي">🎙️</button>
+      <button class="round" id="sumNow" title="اكتبوا خلاصة الآن">📝</button>
       <span class="spacer"></span>
       <button class="round" id="send" title="إرسال">↑</button>
     </div>
@@ -455,7 +456,7 @@ function systemPrompt(me){
 الرسائل تصلك موسومة بأسماء أصحابها مثل [المستخدم] و[${o}]. لا تكتب وسم اسمك في بداية ردك، التطبيق يضيفه.
 لا تتكلم نيابةً عن ${o} ولا تكتب رده.
 خاطب المستخدم مباشرة بصيغة «أنت»، ولا تكتب «@المستخدم» أو «[المستخدم]» في ردك.
-بالنقاشات: ادخلوا مباشرة بنقاط الخلاف فقط. كحد أقصى 3 ردود من كل موديل بعد رسالة المستخدم. إذا اتفقتما ولم يبق خلاف، اكتب [تم] فقط بدون أي كلمة أخرى، والتطبيق يطلب الخلاصة من الطرف الآخر.`;
+بالنقاشات: ادخلوا مباشرة بنقاط الخلاف فقط. كحد أقصى 3 ردود من كل موديل بعد رسالة المستخدم. إذا اتفقتما ولم يبق خلاف، اكتب [تم] فقط بدون أي كلمة أخرى، والتطبيق يقرر متى تُكتب الخلاصة ومن يكتبها.`;
 }
 
 /* ===== الخلاصات: سجل منفصل لكل محادثة (التراجع والدمج)، والمحادثة نفسها لا تُعدّل أبداً ===== */
@@ -1178,18 +1179,21 @@ async function send(){
       const isShort = text.replace(/\s+/g,' ').length < 25;
       const EXIT = ' إذا لم يكن عندك شيء جديد ومفيد تضيفه، أو طلب المستخدم التوقف، اكتب فقط: [تم]';
       if (S.mode === 'debate' && !isShort && !inCall){   // في المكالمة: رد واحد لكل طرف حتى لا يطول
-        // حتى 3 ردود من كل موديل (6 بالمجموع). [تم] = اتفاق ← الآخر يكتب الخلاصة (ولا يُستدعى صاحب [تم] بعدها)
-        // بدون اتفاق حتى الحد ← آخر من ردّ يكتب الخلاصة. إيقافك = لا خلاصة، والرسائل تبقى للخلاصة القادمة
+        // حتى 3 ردود من كل موديل (6 بالمجموع). [تم] = اتفاق. إيقافك = لا خلاصة، والرسائل تبقى مفتوحة
+        // شرط الخلاصة: الوصول للسقف، أو نقاش فعلي (ردّان حقيقيان على الأقل) وقبله سؤال سابق منذ آخر خلاصة.
+        // جواب واحد بلا خلاف = لا خلاصة، ويبقى السؤال والجواب ضمن الرسائل المفتوحة
         const AGREE = ' ادخل مباشرة بنقاط الخلاف فقط. إذا اتفقتما ولم يبق خلاف، اكتب فقط: [تم]';
-        let summarized = false, agreedBy = null, lastWho = null;
+        const userQs = history.slice(activeSummaries().lastIdx + 1).filter(m => m.who === 'user').length;   // يشمل سؤالك الحالي
+        let summarized = false, agreedBy = null, lastWho = null, real = 0, capped = true;
         for (let i = 0; i < 6 && !stopRequested; i++){
           const who = i % 2 ? b : a, prev = other(who);
           const r = await speak(who, i === 0 ? null : `رد على آخر ما قاله ${LABEL[prev]}.` + AGREE);
-          if (r === 'summary'){ summarized = true; break; }        // كتب الخلاصة بنفسه
-          if (r === 'done'){ agreedBy = who; break; }
-          if (r !== 'empty') lastWho = who;
+          if (r === 'summary'){ summarized = true; capped = false; break; }        // كتب الخلاصة بنفسه
+          if (r === 'done'){ agreedBy = who; capped = false; break; }
+          if (r !== 'empty'){ lastWho = who; real++; }
         }
-        if (!summarized && !stopRequested){
+        const needSummary = !stopRequested && (capped || (real >= 2 && userQs >= 2));
+        if (!summarized && needSummary){
           const writer = agreedBy ? other(agreedBy) : lastWho;
           if (writer) summarized = await writeSummary(writer);
         }
@@ -1206,11 +1210,13 @@ async function send(){
 }
 
 /* تعليمة الخلاصة (البند 4) */
-const SUMMARY_NOTE = 'اكتب الخلاصة الآن. أول سطر في ردك يجب أن يكون [خلاصة] وحده بدون أي شيء قبله. '
-  + 'الخلاصة تغطي كل الرسائل منذ آخر خلاصة (أو من بداية المحادثة إن لم توجد)، حتى لو انقطع النقاش قبل نهايته. '
-  + 'اذكر فيها: أوامر المستخدم وقراراته وقيوده بصياغته هو، والقرارات المتفق عليها، والنقاط المفتوحة مع موقف كل موديل وسببه، '
-  + 'وأي أرقام أو أكواد حرفياً كما وردت. إذا وُجدت ملفات PDF أو صور فاذكر محتواها الجوهري وأرقامها حرفياً مع اسم الملف، '
-  + 'لأن المرفقات لن تُرسل بعد هذه الخلاصة، والخلاصة لا تعوّض الملف الأصلي.';
+const SUMMARY_NOTE = 'اكتب الخلاصة الآن بهذا القالب بالضبط. أول سطر في ردك [خلاصة] وحده بدون أي شيء قبله. '
+  + 'لا تذكر أسماء الموديلات ولا «قال فلان». تغطي كل الرسائل منذ آخر خلاصة (أو من بداية المحادثة)، حتى لو انقطع النقاش. الأقسام بالترتيب:\n'
+  + '**أسئلتي وأوامري:** كل أسئلة المستخدم وأوامره منذ آخر خلاصة في قسم واحد، بصياغته الحرفية مختصرة، للتذكير فقط وبدون أجوبتها.\n'
+  + '**الاتفاق:** القرارات النهائية الكاملة، كل قرار بسطر، ومعها النتيجة المهمة لكل سؤال انجاوب بجواب واحد بدون نقاش. هذا أهم قسم.\n'
+  + '**الخلاف:** فقط إذا وُجد خلاف: نقطة الخلاف والخيارات، والقرار للمستخدم.\n'
+  + '**المرفقات:** فقط إذا وُجدت ملفات PDF أو صور: اسم الملف ومحتواه الجوهري وأرقامه حرفياً، لأن المرفقات لن تُرسل بعد هذه الخلاصة.\n'
+  + 'احذف أي قسم فارغ تماماً ولا تكتب «لا يوجد». الأرقام والأكواد حرفياً.';
 /* البند 9: إذا فشل رد الخلاصة (خطأ أو لم يبدأ بـ[خلاصة]) نعيد مرة واحدة، ثم نؤجل التقليص */
 async function writeSummary(who){
   for (let attempt = 0; attempt < 2 && !stopRequested; attempt++){
@@ -1229,7 +1235,7 @@ async function maybeMerge(){
   if (unmerged.length < 15) return;
   const ten = unmerged.slice(0, 10);
   const prompt = 'ادمج الخلاصات العشر التالية في خلاصة شاملة واحدة. أول سطر يجب أن يكون [خلاصة_شاملة] وحده. '
-    + 'احفظ أوامر المستخدم وقراراته وقيوده بصياغته، وما اتُّفق عليه، ونقاط الخلاف بموقف كل موديل وسببه، والأرقام والأكواد حرفياً. '
+    + 'استعمل نفس القالب بدون أسماء موديلات: **أسئلتي وأوامري** (بصياغة المستخدم مختصرة)، **الاتفاق** (كل قرار بسطر)، **الخلاف** (فقط إن وُجد)، **المرفقات** (فقط إن وُجدت)، واحذف القسم الفارغ. الأرقام والأكواد حرفياً. '
     + 'إذا تغيّر قرار في خلاصة لاحقة فاذكر الأحدث وأشر للقديم.\n\n'
     + ten.map((x, n) => `--- الخلاصة ${n + 1} (من ${LABEL[x.m.who]}) ---\n${x.m.text}`).join('\n\n');
   for (let attempt = 0; attempt < 2; attempt++){
@@ -1319,6 +1325,20 @@ function addCopy(div, text){
   bar.appendChild(b); div.appendChild(bar);
   return div;
 }
+/* خلاصة يدوية: يكتبها آخر موديل ردّ منذ آخر خلاصة (أو المتوفر مفتاحه) */
+document.getElementById('sumNow').onclick = async () => {
+  if (busy) return;
+  const seg = history.slice(activeSummaries().lastIdx + 1);
+  if (!seg.some(m => m.who === 'claude' || m.who === 'gemini')) return bubble('error', 'ℹ️ لا توجد رسائل جديدة منذ آخر خلاصة');
+  if (!confirm('تكتب خلاصة الآن لكل الرسائل منذ آخر خلاصة؟')) return;
+  const ready = ['claude','gemini'].filter(w => w === 'claude' ? S.claudeKey : (S.geminiKey || S.orKey));
+  const last = [...seg].reverse().find(m => (m.who === 'claude' || m.who === 'gemini') && ready.includes(m.who));
+  const who = last ? last.who : ready[0];
+  if (!who) return bubble('error', '⚠️ ضع مفتاحاً واحداً على الأقل في الإعدادات ⚙️');
+  busy = true; stopRequested = false; setSendState();
+  try{ if (await writeSummary(who)) await maybeMerge(); }catch(e){}
+  busy = false; setSendState();
+};
 function setSendState(){
   sendBtn.textContent = busy ? '■' : '↑';
   sendBtn.classList.toggle('stop', busy);
