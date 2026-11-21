@@ -463,20 +463,24 @@ async function buildTurns(me, extra){
   const start = ctxStart();
   const recent = history.slice(start);
   lastCtx = { start, count: recent.length };
-  const withAtts = recent.filter(m => m.atts && m.atts.length).slice(-3);
+  // الصور والملفات تُرسل كاملة فقط إذا كانت ضمن آخر 3 رسائل في المحادثة،
+  // والأقدم يُستبدل بنص (الصورة تبقى عندك بالواجهة والمخزن). المحادثة المعلّمة 📌 تُرسل مرفقاتها كاملة
+  const c = curChat(), keepAll = !!(c && c.noTrim);
+  const keepFrom = history.length - 3;
   for (const m of recent){
     const role = m.who === me ? 'assistant' : 'user';
     let text = role === 'assistant' ? m.text : `[${LABEL[m.who]}]: ${m.text}`;
     const atts = [];
     if (m.atts && m.atts.length){
-      if (withAtts.includes(m)){
+      if (keepAll || history.indexOf(m) >= keepFrom){
         for (const a of m.atts){
           const data = await attGet(a.id);
           if (data) atts.push({ mime:a.mime, name:a.name, data });
           else text += `\n[مرفق لم يعد متوفراً: ${a.name}]`;
         }
       } else {
-        text += '\n' + m.atts.map(a => `[مرفق سابق: ${a.name}]`).join(' ');
+        text += '\n' + m.atts.map(a => a.mime === 'application/pdf'
+          ? `[ملف PDF مرفق سابقاً: ${a.name}]` : `[صورة مرفقة سابقاً: ${a.name}]`).join(' ');
       }
     }
     const last = turns[turns.length-1];

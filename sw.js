@@ -1,5 +1,5 @@
 // يجعل التطبيق يفتح بسرعة وحتى بدون إنترنت، مع جلب أحدث نسخة دائماً عند توفر الاتصال
-const CACHE = 'majlis-v12';
+const CACHE = 'majlis-v13';
 const SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
