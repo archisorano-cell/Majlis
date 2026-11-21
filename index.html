@@ -138,7 +138,16 @@
   .trimline{align-self:stretch;text-align:center;font-size:12px;color:var(--muted);border-top:1px dashed var(--line);padding-top:6px;margin:4px 0}
   .fullnote{align-self:stretch;text-align:center;font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px}
   .citem button.on{color:var(--claude)}
+  .sumbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:var(--muted)}
+  .sumbar button:disabled{opacity:.4;cursor:default}
+  .sumbar button{background:none;border:1px solid var(--line);border-radius:10px;padding:4px 10px;font-size:12px;cursor:pointer}
   /* التكلفة والتنبيهات */
+  .cutnote{font-size:12px;color:#ffb4a8;margin-top:6px}
+  .acts{display:flex;gap:6px;margin-top:6px}
+  .copybtn{background:none;border:1px solid transparent;border-radius:8px;padding:3px 8px;font-size:12px;color:var(--muted);cursor:pointer}
+  .copybtn:active{border-color:var(--line);background:var(--surface)}
+  .jump{position:fixed;left:50%;transform:translateX(-50%);z-index:20;display:none;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:8px 16px;font-size:14px;box-shadow:0 4px 14px rgba(0,0,0,.4);cursor:pointer}
+  .jump.show{display:block}
   .costline{font-size:11px;color:var(--muted);margin-top:6px;direction:rtl}
   #chatCost{font-size:12px;color:var(--muted);white-space:nowrap;direction:ltr}
   .banner{display:none;margin:6px 14px 0;padding:10px 12px;border:1px solid var(--line);border-radius:14px;
@@ -234,6 +243,7 @@
 </div>
 
 <main id="chat"></main>
+<button id="newReply" class="jump">↓ رد جديد</button>
 
 <footer>
   <div class="composer">
@@ -265,8 +275,8 @@
   <label>نموذج Gemini عبر OpenRouter</label>
   <input type="text" id="orModel">
   <div class="hint">إذا وضعت مفتاح OpenRouter، يرد Gemini عبره. اتركه فارغاً لتبقى على مفتاح Google المجاني.</div>
-  <label>عدد جولات النقاش (في وضع «نقاش + خلاصة»)</label>
-  <input type="number" id="rounds" min="1" max="5">
+  <div class="hint">وضع «نقاش + خلاصة»: حتى 3 ردود من كل طرف، ثم خلاصة تبدأ بـ[خلاصة].</div>
+  <input type="number" id="rounds" min="1" max="5" hidden>
   <div class="row"><input type="checkbox" id="autoSend"> <span>إرسال الرسالة الصوتية مباشرة بعد التسجيل</span></div>
   <label>نوع الصوت عند قراءة الردود 🔊</label>
   <select id="ttsEngine" style="width:100%;border-radius:10px">
@@ -286,6 +296,9 @@
   </div>
   <label>💰 التكلفة هذا الشهر</label>
   <div class="costbox" id="costBox"></div>
+  <label>📜 الأوامر الدائمة (تُرسل مع كل طلب بعد التعليمات وقبل الخلاصات)</label>
+  <textarea id="permBlock" rows="4" style="width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px"></textarea>
+  <div class="hint">لا تدخل في الدمج ولا تُعدّل تلقائياً. اجعلها قصيرة، فهي تُدفع مع كل رد.</div>
   <label>📚 السياق المرسل للنموذجين</label>
   <div style="display:flex;gap:8px;align-items:center;font-size:13px">
     <span>حتى</span><input type="number" id="trimAt" min="8" style="width:64px">
@@ -441,7 +454,49 @@ function systemPrompt(me){
 رد بنفس لغة ولهجة المستخدم.
 الرسائل تصلك موسومة بأسماء أصحابها مثل [المستخدم] و[${o}]. لا تكتب وسم اسمك في بداية ردك، التطبيق يضيفه.
 لا تتكلم نيابةً عن ${o} ولا تكتب رده.
-خاطب المستخدم مباشرة بصيغة «أنت»، ولا تكتب «@المستخدم» أو «[المستخدم]» في ردك.`;
+خاطب المستخدم مباشرة بصيغة «أنت»، ولا تكتب «@المستخدم» أو «[المستخدم]» في ردك.
+بالنقاشات: ادخلوا مباشرة بنقاط الخلاف فقط. كحد أقصى 3 ردود من كل موديل بعد رسالة المستخدم. إذا اتفقتما ولم يبق خلاف، اكتب [تم] فقط بدون أي كلمة أخرى، والتطبيق يطلب الخلاصة من الطرف الآخر.`;
+}
+
+/* ===== الخلاصات: سجل منفصل لكل محادثة (التراجع والدمج)، والمحادثة نفسها لا تُعدّل أبداً ===== */
+const SUM_RE = /^\s*\[(خلاصة|خلاصة_شاملة)\]/;                     // الوسم يجب أن يكون أول سطر
+function ctxRec(){ return store.get('majlis_ctx_' + currentId, null) || { undone:[], merges:[] }; }
+function ctxSave(r){ store.set('majlis_ctx_' + currentId, r); }
+const msgKey = (m, i) => m.ts ? String(m.ts) : 'i' + i;
+function isSummaryMsg(m, i, rec){
+  if (!m || (m.who !== 'claude' && m.who !== 'gemini')) return false;
+  const first = (m.text || '').split('\n')[0];
+  if (!SUM_RE.test(first)) return false;
+  return !(rec || ctxRec()).undone.includes(msgKey(m, i));
+}
+/* الخلاصات الفعّالة بالترتيب: الدمج الشامل يحل محل الخلاصات التي غطّاها */
+function activeSummaries(){
+  const rec = ctxRec(), merges = rec.merges.filter(x => !x.undone);
+  const covered = new Set(merges.flatMap(x => x.covers));
+  const out = [], seenMerge = new Set();
+  let last = -1, unmerged = [];
+  history.forEach((m, i) => {
+    if (!isSummaryMsg(m, i, rec)) return;
+    last = i;
+    const k = msgKey(m, i);
+    const mg = merges.find(x => x.covers.includes(k));
+    if (mg){ if (!seenMerge.has(mg.id)){ seenMerge.add(mg.id); out.push({ kind:'merge', text: mg.text }); } }
+    else { out.push({ kind:'sum', who: m.who, text: m.text }); unmerged.push({ m, i, k }); }
+  });
+  return { list: out, lastIdx: last, unmerged };
+}
+/* ما يُضاف بعد التعليمات الثابتة: الأوامر الدائمة ثم الخلاصات */
+function ctxSystemParts(){
+  const parts = [];
+  const perm = (S.permBlock || '').trim();
+  if (perm) parts.push('[أوامر دائمة من المستخدم، التزم بها دائماً]\n' + perm);
+  const c = curChat();
+  if (!(c && c.noTrim)){
+    const { list } = activeSummaries();
+    if (list.length) parts.push('[خلاصات النقاشات السابقة في هذه المحادثة، بالترتيب من الأقدم]\n\n' +
+      list.map((x, n) => `(${n + 1}) ` + (x.kind === 'merge' ? '' : `من ${LABEL[x.who]}: `) + x.text).join('\n\n'));
+  }
+  return parts;
 }
 
 /* يحوّل السجل المشترك إلى أدوار يفهمها كل نموذج: رسائله = assistant، والباقي = user موسوم بالاسم */
@@ -465,13 +520,18 @@ function ctxStart(n){
   return (n - K) - ((n - T - 1) % step);          // ثابتة خلال الدفعة، وتقفز عند كل قصّة
 }
 let lastCtx = { start:0, count:0 };
-async function buildTurns(me, extra){
+async function buildTurns(me, extra, full){
   const turns = [];
-  const start = ctxStart();
   // نسخة جديدة فقط: history الأصلية لا تُعدّل أبداً (لا splice ولا حذف)
-  // الأولى مثبتة + الذيل. الرسالة لا تُقطع أبداً (مع صورها)، والأدوار المتتالية تُدمج تحت فلا يصير user ورا user
-  const recent = start ? [history[0], ...history.slice(start)] : history.slice(0);
-  lastCtx = { start, count: recent.length };
+  // بعد آخر خلاصة تُرسل الرسائل التي بعدها فقط (الخلاصات نفسها في التعليمات). 📌 = كل شيء
+  const cc = curChat();
+  const seg = (cc && cc.noTrim) ? 0 : activeSummaries().lastIdx + 1;
+  const part = history.slice(seg);
+  // قص الطوارئ 20→7: فقط إذا طال النقاش بعد آخر خلاصة بدون خلاصة جديدة
+  const t = full ? 0 : ctxStart(part.length);   // طلب الخلاصة: كل الرسائل منذ آخر خلاصة بدون قص (البند 7)
+  const recent = t ? [part[0], ...part.slice(t)] : part;
+  const start = seg + t;
+  lastCtx = { start, seg, count: recent.length };
   // الصور والملفات تُرسل كاملة فقط إذا كانت ضمن آخر 3 رسائل في المحادثة،
   // والأقدم يُستبدل بنص (الصورة تبقى عندك بالواجهة والمخزن). المحادثة المعلّمة 📌 تُرسل مرفقاتها كاملة
   const c = curChat(), keepAll = !!(c && c.noTrim);
@@ -479,10 +539,10 @@ async function buildTurns(me, extra){
   for (const m of recent){
     const role = m.who === me ? 'assistant' : 'user';
     let text = role === 'assistant' ? m.text : `[${LABEL[m.who]}]: ${m.text}`;
-    if (start && m === history[start]) text = `[ملاحظة: حُذفت ${start - 1} رسالة من وسط المحادثة لتوفير التكلفة]\n` + text;
+    if (t && m === part[t]) text = `[ملاحظة: حُذفت ${t - 1} رسالة من وسط المحادثة لتوفير التكلفة]\n` + text;
     const atts = [];
     if (m.atts && m.atts.length){
-      if (keepAll || history.indexOf(m) >= keepFrom){
+      if (keepAll || full || history.indexOf(m) >= keepFrom){   // الخلاصة ترى كل مرفقات جولتها (البند 8)
         for (const a of m.atts){
           const data = await attGet(a.id);
           if (data) atts.push({ mime:a.mime, name:a.name, data });
@@ -673,9 +733,12 @@ function claudeBody(turns, system){
           : { type:'image', source:{ type:'base64', media_type:a.mime, data:a.data } }),
         { type:'text', text:t.text } ]
     : t.text }));
-  const body = { model:S.claudeModel, max_tokens: inCall ? 500 : 1500, system, stream: true, messages };
+  const parts = Array.isArray(system) ? system : [system];
+  const body = { model:S.claudeModel, max_tokens: inCall ? 500 : (sumCall ? 4000 : 1500), system: parts.join('\n\n'), stream: true, messages };
   if (S.cacheOn){
-    body.system = [{ type:'text', text: system, cache_control:{ type:'ephemeral' } }];
+    // كل جزء كتلة مستقلة، ونقطة الكاش على آخرها (التعليمات + الأوامر الدائمة + الخلاصات ثابتة بين الطلبات)
+    body.system = parts.map(x => ({ type:'text', text: x }));
+    body.system[body.system.length - 1].cache_control = { type:'ephemeral' };
     let k = -1;
     for (let i = messages.length - 2; i >= 0; i--) if (messages[i].role === 'assistant'){ k = i; break; }
     if (k >= 0){
@@ -708,6 +771,7 @@ async function callClaude(turns, system, onDelta){
       Object.assign(liveUsage, { inBase, cw, cr, inKnown: true });
     }
     if (ev.type === 'message_delta' && ev.usage){ outTok = ev.usage.output_tokens || outTok; liveUsage.out = outTok; }
+    if (ev.type === 'message_delta' && ev.delta && ev.delta.stop_reason === 'max_tokens') lastCut = true;
     if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta'){
       text += ev.delta.text; if (onDelta) onDelta(text);
     } else if (ev.type === 'error'){
@@ -728,8 +792,8 @@ function setStatus(t){ if (typingEl) typingEl.lastChild.textContent = t; }
 function genConfig(model){
   // thinkingLevel لنماذج Gemini 3 فقط؛ النماذج الأقدم (2.5) لا تقبله
   return /^gemini-[3-9]/.test(model)
-    ? { maxOutputTokens:4000, thinkingConfig:{ thinkingLevel:'low' } }
-    : { maxOutputTokens:4000 };
+    ? { maxOutputTokens: sumCall ? 8000 : 4000, thinkingConfig:{ thinkingLevel:'low' } }
+    : { maxOutputTokens: sumCall ? 8000 : 4000 };   // الحد يشمل تفكير Gemini الداخلي، والخلاصة أطول
 }
 
 async function geminiRequest(body, withConfig){
@@ -767,6 +831,7 @@ async function geminiRequest(body, withConfig){
       const um = d.usageMetadata || {};
       lastUsage = { inTok: um.promptTokenCount || 0, outTok: um.candidatesTokenCount || 0, usd: 0, free: true };
       const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
+      if (d.candidates && d.candidates[0] && d.candidates[0].finishReason === 'MAX_TOKENS') lastCut = true;
       lastModel = model;
       store.set('majlis_gemini_ok', { m:model, t:Date.now() });
       return parts.map(p => p.text || '').join('').trim();
@@ -786,7 +851,7 @@ async function callOpenRouter(turns, system, onDelta){
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
-    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 4000, reasoning:{ effort:'low' }, stream: true, usage:{ include: true },
+    body: JSON.stringify({ model, max_tokens: inCall ? 800 : (sumCall ? 8000 : 4000), reasoning:{ effort:'low' }, stream: true, usage:{ include: true },
       messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
         ? [ ...t.atts.map(a => a.mime === 'application/pdf'
               ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
@@ -811,6 +876,7 @@ async function callOpenRouter(turns, system, onDelta){
         usd: actual ? u.cost : estimateUsd(model, u.prompt_tokens, u.completion_tokens), est: !actual,
         cr: det.cached_tokens || 0, cw: det.cache_write_tokens || 0, model };
     }
+    if (ev.choices && ev.choices[0] && ev.choices[0].finish_reason === 'length') lastCut = true;
     const c = ev.choices && ev.choices[0] && ev.choices[0].delta && ev.choices[0].delta.content;
     if (c){ text += c; if (onDelta) onDelta(text); }
   });
@@ -853,19 +919,48 @@ function bubble(who, text, cls, model, atts){
     if (whoEl) whoEl.after(box); else div.prepend(box);
   }
   chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
+  if (who === 'user' && !renderingAll) chat.scrollTop = chat.scrollHeight;   // فقط رسالتك أنت (البند 9)
   return div;
 }
-function renderAll(){
+let renderingAll = false;
+/* keep = يبقى مكان القراءة كما هو (بعد خلاصة أو تراجع). بدونه: فتح المحادثة ينزل للأسفل */
+function renderAll(keep){
+  const y = chat.scrollTop, ui = unseenEl && unseenEl.dataset.idx;
+  renderingAll = true;
   chat.innerHTML = '';
   if (!history.length){
     const n = document.createElement('div'); n.className = 'note';
     n.innerHTML = '<b>✳ مجلس الثلاثة</b><br>اكتب فكرتك أو سجّلها بصوتك.<br>«يردّان مرة»: كل واحد يرد بالدور.<br>«نقاش + خلاصة»: يتناقشان فيما بينهما ثم يعطونك الخلاصة.';
     chat.appendChild(n);
   }
-  history.forEach((m, i) => { const d = appendCost(bubble(m.who, m.text, m.summary ? 'summary' : '', m.model, m.atts), m); d.dataset.idx = i; });
+  const rec = ctxRec();
+  history.forEach((m, i) => {
+    const isSum = SUM_RE.test((m.text || '').split('\n')[0]) && (m.who === 'claude' || m.who === 'gemini');
+    const d = appendCost(addCut(bubble(m.who, m.text, (m.summary || isSum) ? 'summary' : '', m.model, m.atts), m), m); d.dataset.idx = i;
+    if (m.who === 'claude' || m.who === 'gemini') addCopy(d, m.text);
+    if (isSum){
+      const undone = rec.undone.includes(msgKey(m, i));
+      const lastActive = activeSummaries().lastIdx;
+      const mg = rec.merges.find(x => x.covers.includes(msgKey(m, i)));
+      const bar = document.createElement('div'); bar.className = 'sumbar';
+      const btn = document.createElement('button');
+      btn.textContent = undone ? '↻ اعتمد هذه الخلاصة' : '↩︎ تراجع عن الخلاصة';
+      btn.onclick = () => toggleSummary(i);
+      if (!undone && i !== lastActive){ btn.disabled = true; btn.title = 'تراجع عن الخلاصات الأحدث أولاً'; }
+      bar.append(undone ? 'غير معتمدة: رسائل جولتها تُرسل' : (mg && !mg.undone ? '🗜️ مدموجة في خلاصة شاملة' : 'معتمدة: الرسائل قبلها لا تُرسل'), btn);
+      if (mg && mg.covers[0] === msgKey(m, i)){
+        const b2 = document.createElement('button');
+        b2.textContent = mg.undone ? '↻ أعد الدمج الشامل' : '↩︎ تراجع عن الدمج الشامل';
+        b2.onclick = () => toggleMerge(mg.id); bar.append(b2);
+      }
+      d.appendChild(bar);
+    }
+  });
   updateTrimUI();
   updateCostUI();
+  renderingAll = false;
+  chat.scrollTop = keep ? y : chat.scrollHeight;
+  unseenEl = ui != null ? chat.querySelector(`[data-idx="${ui}"]`) : null; checkJump();
 }
 /* سطر صغير تحت كل رد: التكلفة وحجم السياق المرسل */
 /* حالة الكاش وفرقها عن نفس الطلب بدون كاش */
@@ -918,13 +1013,12 @@ function updateTrimUI(){
     chat.prepend(n);
     return;
   }
-  const start = ctxStart();
-  if (!start) return;
-  const el = chat.querySelector(`[data-idx="${start}"]`);
-  if (!el) return;
-  const line = document.createElement('div'); line.className = 'trimline';
-  line.textContent = `الرسائل من 2 إلى ${start} فوق هذا الخط محفوظة عندك ولا تُرسل (الأولى مثبتة وتُرسل دائماً)`;
-  el.before(line);
+  const seg = activeSummaries().lastIdx + 1;
+  const t = ctxStart(history.length - seg);
+  const mark = (idx, txt) => { const el = chat.querySelector(`[data-idx="${idx}"]`); if (!el) return;
+    const line = document.createElement('div'); line.className = 'trimline'; line.textContent = txt; el.before(line); };
+  if (seg > 0 && seg < history.length) mark(seg, 'فوق هذا الخط: تُرسل الخلاصات فقط، والرسائل محفوظة عندك');
+  if (t) mark(seg + t, `قص طوارئ: الرسائل بين أول رسالة بعد الخلاصة وهذا الخط لا تُرسل`);
 }
 function chatSpend(){
   const c = chats.find(c => c.id === currentId);
@@ -937,17 +1031,18 @@ function updateCostUI(){
 }
 
 /* ===== منطق المحادثة ===== */
-let busy = false, stopRequested = false, aborter = null;
+let busy = false, stopRequested = false, aborter = null, sumCall = false, lastCut = false;
 
 async function speak(who, extra, isSummary){
-  const typing = bubble(who, '…يكتب', 'typing');
-  typingEl = typing; lastModel = ''; lastUsage = null; liveUsage = {};
+  const typing = bubble(who, '…يكتب', 'typing'); noteNewReply(typing);
+  typingEl = typing; lastModel = ''; lastUsage = null; liveUsage = {}; lastCut = false;
   let promptChars = 0, partialText = '', attCount = 0, sent = false;
   aborter = new AbortController();
   try{
     const CALL_NOTE = 'أنت الآن في مكالمة صوتية: رد بجملتين إلى أربع جمل قصيرة بأسلوب كلام طبيعي، بدون قوائم أو عناوين أو رموز أو إيموجي.';
-    const turns = await buildTurns(who, inCall ? (extra ? extra + '\n' + CALL_NOTE : CALL_NOTE) : extra);
-    const sys = systemPrompt(who);
+    const turns = await buildTurns(who, inCall ? (extra ? extra + '\n' + CALL_NOTE : CALL_NOTE) : extra, !!isSummary);
+    const sysParts = [systemPrompt(who), ...ctxSystemParts()];   // التعليمات ← الأوامر الدائمة ← الخلاصات
+    const sys = sysParts.join('\n\n');
     promptChars = sys.length + turns.reduce((a, t) => a + t.text.length, 0);
     attCount = turns.reduce((a, t) => a + (t.atts ? t.atts.length : 0), 0);
     const cls = isSummary ? 'summary' : '';
@@ -957,10 +1052,9 @@ async function speak(who, extra, isSummary){
     const onDelta = t => {
       partialText = t;
       if (isPass(t)) return;
-      if (!live){ typing.remove(); live = bubble(who, '', cls); }
+      if (!live){ typing.remove(); live = bubble(who, '', cls); swapReply(typing, live); }
       const head = live.querySelector('.who');
       live.innerHTML = (head ? head.outerHTML : '') + fmt(t);
-      if (chat.scrollHeight - chat.scrollTop - chat.clientHeight < 160) chat.scrollTop = chat.scrollHeight;
       if (S.tts){
         // نُبقي آخر جملة مكتملة بلا قراءة حتى يصل ما بعدها، فلا تبقى نهاية قصيرة وحدها
         const rest = t.slice(spoken), ends = [];
@@ -971,8 +1065,8 @@ async function speak(who, extra, isSummary){
         }
       }
     };
-    sent = true;
-    const text = who === 'claude' ? await callClaude(turns, sys, onDelta) : await callGemini(turns, sys, onDelta);
+    sent = true; sumCall = !!isSummary;
+    const text = who === 'claude' ? await callClaude(turns, sysParts, onDelta) : await callGemini(turns, sys, onDelta);
     typing.remove();
     // التكلفة تُحسب حتى لو انسحب الطرف بـ[تم]، لأن الطلب نفسه مدفوع
     const cost = lastUsage ? { usd: lastUsage.usd, est: !!lastUsage.est, free: !!lastUsage.free,
@@ -988,19 +1082,26 @@ async function speak(who, extra, isSummary){
       ? `[المجلس] claude: input_tokens=${lastUsage.inBase || 0} output_tokens=${lastUsage.outTok || 0} cache_read_input_tokens=${lastUsage.cr || 0} cache_creation_input_tokens=${lastUsage.cw || 0} رسائل_مرسلة=${lastCtx.count}`
       : `[المجلس] gemini: prompt_tokens=${lastUsage.inTok || 0} completion_tokens=${lastUsage.outTok || 0} cached_tokens=${lastUsage.cr || 0} cache_write_tokens=${lastUsage.cw || 0} رسائل_مرسلة=${lastCtx.count}`);
     // رد فارغ أو [تم] = لا يوجد شيء جديد يضيفه: نتجاوزه بهدوء وننهي النقاش
-    if (!text || /^\[?\s*تم\s*\]?\.?$/.test(text)){ if (live) live.remove(); return 'done'; }
+    // [تم] بمطابقة كاملة بعد حذف المسافات = اتفاق (البند 4). الرد الفارغ يُتجاوز
+    // رد فارغ لأن التفكير الداخلي استهلك كل الحد: لا نتجاوزه بصمت
+    if (!text && lastCut) bubble('error', `⚠️ رد ${LABEL[who]} طلع فارغ: التفكير الداخلي استهلك الحد الأقصى للطول`);
+    if (!text || text.replace(/\s+/g, '') === '[تم]'){ if (live) live.remove(); checkJump(); return text ? 'done' : 'empty'; }
     const m = { who, text, ts:Date.now(), model: who === 'claude' ? S.claudeModel : lastModel };
     if (isSummary) m.summary = true;
     if (cost) m.cost = cost;
+    if (lastCut) m.cut = true;                      // حقل اختياري: الرد انقطع عند الحد الأقصى للطول
     history.push(m); saveAll();
-    const fin = bubble(who, text, cls, m.model);
+    const fin = bubble(who, text, (SUM_RE.test(text.split('\n')[0]) ? 'summary' : cls), m.model);
     fin.dataset.idx = history.length - 1;
-    appendCost(fin, m); updateCostUI();
+    addCut(fin, m); appendCost(fin, m); addCopy(fin, text); updateCostUI();
     if (live){ live.replaceWith(fin); }
+    swapReply(live || typing, fin); checkJump();
     updateTrimUI();
     // باقي النص الذي لم يُقرأ بعد (أو كله إذا لم يكن الرد متدفقاً)
     const tail = text.slice(Math.min(spoken, text.length));
     if (tail.trim()) sayTail(who, tail);
+    if (!isSummary && SUM_RE.test(text.split('\n')[0])){ renderAll(true); return 'summary'; }
+    if (isSummary) renderAll(true);
   }catch(e){
     typing.remove();
     // رد مقطوع: المزوّد يحاسب على الإدخال كاملاً وعلى ما وُلّد قبل الانقطاع
@@ -1009,7 +1110,7 @@ async function speak(who, extra, isSummary){
     bubble('error', (e.name === 'AbortError' ? '⏹ تم إيقاف النقاش' : '⚠️ ' + e.message) + note);
     throw e;
   }finally{
-    aborter = null; typingEl = null;
+    aborter = null; typingEl = null; sumCall = false;
   }
 }
 /* تقدير تكلفة الرد المقطوع (حد أعلى محافظ): الإدخال كاملاً + الخروج الذي وصل */
@@ -1077,15 +1178,22 @@ async function send(){
       const isShort = text.replace(/\s+/g,' ').length < 25;
       const EXIT = ' إذا لم يكن عندك شيء جديد ومفيد تضيفه، أو طلب المستخدم التوقف، اكتب فقط: [تم]';
       if (S.mode === 'debate' && !isShort && !inCall){   // في المكالمة: رد واحد لكل طرف حتى لا يطول
-        const rounds = Math.max(1, Math.min(5, +S.rounds || 2));
-        let ended = false;
-        for (let r = 0; r < rounds && !stopRequested && !ended; r++){
-          if (await speak(a, r > 0 ? `هذه الجولة ${r+1} من النقاش: رد مباشرة على آخر ما قاله ${LABEL[b]}، طوّر الفكرة أو انتقدها.` + EXIT : null) === 'done') { ended = true; break; }
-          if (stopRequested) break;
-          if (await speak(b, `هذه جولة نقاش: رد مباشرة على ما قاله ${LABEL[a]}، وافق أو خالف مع السبب، وطوّر الفكرة.` + EXIT) === 'done') { ended = true; break; }
+        // حتى 3 ردود من كل موديل (6 بالمجموع). [تم] = اتفاق ← الآخر يكتب الخلاصة (ولا يُستدعى صاحب [تم] بعدها)
+        // بدون اتفاق حتى الحد ← آخر من ردّ يكتب الخلاصة. إيقافك = لا خلاصة، والرسائل تبقى للخلاصة القادمة
+        const AGREE = ' ادخل مباشرة بنقاط الخلاف فقط. إذا اتفقتما ولم يبق خلاف، اكتب فقط: [تم]';
+        let summarized = false, agreedBy = null, lastWho = null;
+        for (let i = 0; i < 6 && !stopRequested; i++){
+          const who = i % 2 ? b : a, prev = other(who);
+          const r = await speak(who, i === 0 ? null : `رد على آخر ما قاله ${LABEL[prev]}.` + AGREE);
+          if (r === 'summary'){ summarized = true; break; }        // كتب الخلاصة بنفسه
+          if (r === 'done'){ agreedBy = who; break; }
+          if (r !== 'empty') lastWho = who;
         }
-        if (!stopRequested)
-          await speak(a, 'انتهت جولات النقاش. اكتب الآن للمستخدم الخلاصة النهائية: أفضل فكرة توصلنا لها، نقاط الاتفاق، وأي خلاف بقي بينكما مع رأي كل طرف. بإيجاز ووضوح.', true);
+        if (!summarized && !stopRequested){
+          const writer = agreedBy ? other(agreedBy) : lastWho;
+          if (writer) summarized = await writeSummary(writer);
+        }
+        if (summarized) await maybeMerge();
       } else {
         const shortNote = isShort ? 'رسالة المستخدم قصيرة: رد بإيجاز شديد.' + EXIT : null;
         await speak(a, shortNote);
@@ -1097,6 +1205,120 @@ async function send(){
   autoTitle();
 }
 
+/* تعليمة الخلاصة (البند 4) */
+const SUMMARY_NOTE = 'اكتب الخلاصة الآن. أول سطر في ردك يجب أن يكون [خلاصة] وحده بدون أي شيء قبله. '
+  + 'الخلاصة تغطي كل الرسائل منذ آخر خلاصة (أو من بداية المحادثة إن لم توجد)، حتى لو انقطع النقاش قبل نهايته. '
+  + 'اذكر فيها: أوامر المستخدم وقراراته وقيوده بصياغته هو، والقرارات المتفق عليها، والنقاط المفتوحة مع موقف كل موديل وسببه، '
+  + 'وأي أرقام أو أكواد حرفياً كما وردت. إذا وُجدت ملفات PDF أو صور فاذكر محتواها الجوهري وأرقامها حرفياً مع اسم الملف، '
+  + 'لأن المرفقات لن تُرسل بعد هذه الخلاصة، والخلاصة لا تعوّض الملف الأصلي.';
+/* البند 9: إذا فشل رد الخلاصة (خطأ أو لم يبدأ بـ[خلاصة]) نعيد مرة واحدة، ثم نؤجل التقليص */
+async function writeSummary(who){
+  for (let attempt = 0; attempt < 2 && !stopRequested; attempt++){
+    try{
+      await speak(who, SUMMARY_NOTE + (attempt ? ' (المحاولة السابقة لم تبدأ بالوسم الصحيح.)' : ''), true);
+      const last = history[history.length - 1];
+      if (last && last.who === who && SUM_RE.test((last.text || '').split('\n')[0])) return true;
+    }catch(e){ if (e.name === 'AbortError') return false; }
+  }
+  bubble('error', 'ℹ️ تعذّرت كتابة الخلاصة بالوسم الصحيح، فأُجّل التقليص: الرسائل ستُرسل كاملة حتى الخلاصة القادمة');
+  return false;
+}
+/* البند 6: عند 15 خلاصة غير مدموجة، طلب مخفي لموديل واحد يدمج أقدم 10 من نصوصها الأصلية */
+async function maybeMerge(){
+  const { unmerged } = activeSummaries();
+  if (unmerged.length < 15) return;
+  const ten = unmerged.slice(0, 10);
+  const prompt = 'ادمج الخلاصات العشر التالية في خلاصة شاملة واحدة. أول سطر يجب أن يكون [خلاصة_شاملة] وحده. '
+    + 'احفظ أوامر المستخدم وقراراته وقيوده بصياغته، وما اتُّفق عليه، ونقاط الخلاف بموقف كل موديل وسببه، والأرقام والأكواد حرفياً. '
+    + 'إذا تغيّر قرار في خلاصة لاحقة فاذكر الأحدث وأشر للقديم.\n\n'
+    + ten.map((x, n) => `--- الخلاصة ${n + 1} (من ${LABEL[x.m.who]}) ---\n${x.m.text}`).join('\n\n');
+  for (let attempt = 0; attempt < 2; attempt++){
+    try{
+      const out = await hiddenCall(prompt);
+      if (out && SUM_RE.test(out.split('\n')[0]) && /^\s*\[خلاصة_شاملة\]/.test(out)){
+        const rec = ctxRec();
+        rec.merges.push({ id:'g' + Date.now(), at: Date.now(), covers: ten.map(x => x.k), text: out.trim() });
+        ctxSave(rec); renderAll(true);
+        return;
+      }
+    }catch(e){}
+  }
+  bubble('error', 'ℹ️ تعذّر دمج الخلاصات القديمة، سيُعاد المحاولة بعد الخلاصة القادمة');
+}
+/* طلب مخفي بموديل واحد (Gemini Flash عبر OpenRouter إن وُجد، وإلا Claude) وتُحسب تكلفته */
+async function hiddenCall(prompt){
+  if (S.orKey){
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', { method:'POST',
+      headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey, 'X-Title':'Majlis' },
+      body: JSON.stringify({ model:'google/gemini-3.8-flash', max_tokens:4000, usage:{ include:true },
+        messages:[{ role:'user', content: prompt }] }) });
+    const d = await r.json(); if (!r.ok) throw new Error('merge');
+    if (d.usage) addSpend('gemini', typeof d.usage.cost === 'number' ? d.usage.cost : estimateUsd('google/gemini-3.8-flash', d.usage.prompt_tokens, d.usage.completion_tokens));
+    return ((d.choices || [])[0] || {}).message ? d.choices[0].message.content : '';
+  }
+  const r = await fetch('https://api.anthropic.com/v1/messages', { method:'POST',
+    headers:{ 'content-type':'application/json', 'x-api-key':S.claudeKey, 'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+    body: JSON.stringify({ model:S.claudeModel, max_tokens:4000, messages:[{ role:'user', content: prompt }] }) });
+  const d = await r.json(); if (!r.ok) throw new Error('merge');
+  if (d.usage) addSpend('claude', claudeUsd(d.usage.input_tokens, 0, 0, d.usage.output_tokens));
+  return (d.content || []).map(x => x.text || '').join('');
+}
+/* البند 8: التراجع عن خلاصة أو دمج (يُحفظ في سجل منفصل، والمحادثة لا تُعدّل) */
+function toggleSummary(i){
+  const m = history[i], k = msgKey(m, i), rec = ctxRec();
+  if (rec.merges.some(x => !x.undone && x.covers.includes(k))) return alert('هذه الخلاصة داخل دمج شامل. تراجع عن الدمج أولاً.');
+  const at = rec.undone.indexOf(k);
+  // التراجع فقط عن آخر خلاصة فعّالة: التراجع عن خلاصة أقدم يُسقط جولتها من السياق (رسائلها قبل خلاصة أحدث فلا تُرسل)
+  if (at < 0 && i !== activeSummaries().lastIdx) return alert('تراجع عن الخلاصات الأحدث أولاً، من الأحدث للأقدم.');
+  if (at >= 0) rec.undone.splice(at, 1); else rec.undone.push(k);     // سجل التراجع فقط، لا يمس history
+  ctxSave(rec); renderAll(true);
+}
+function toggleMerge(id){
+  const rec = ctxRec(), g = rec.merges.find(x => x.id === id); if (!g) return;
+  g.undone = !g.undone; ctxSave(rec); renderAll(true);
+}
+/* البند 10: زر «↓ رد جديد» إذا وصل رد وأنت تقرأ رسائل سابقة */
+let unseenEl = null;
+const jumpBtn = document.getElementById('newReply');
+function startVisible(el){ return el.getBoundingClientRect().top < chat.getBoundingClientRect().bottom - 8; }
+function noteNewReply(el){
+  if (unseenEl && unseenEl.isConnected) return;                 // يبقى على أول رد لم تره
+  if (startVisible(el)) return;
+  unseenEl = el;
+  jumpBtn.style.bottom = (document.querySelector('footer').offsetHeight + 10) + 'px';
+  jumpBtn.classList.add('show');
+}
+function swapReply(oldEl, newEl){ if (oldEl && unseenEl === oldEl) unseenEl = newEl; }
+function checkJump(){
+  if (!unseenEl || !unseenEl.isConnected || startVisible(unseenEl)){ unseenEl = null; jumpBtn.classList.remove('show'); }
+}
+chat.addEventListener('scroll', checkJump, { passive:true });
+jumpBtn.onclick = () => {
+  if (unseenEl && unseenEl.isConnected) unseenEl.scrollIntoView({ block:'start', behavior:'smooth' });
+  unseenEl = null; jumpBtn.classList.remove('show');
+};
+/* تنبيه إذا انقطع الرد عند الحد الأقصى للطول، حتى لا تحسبه كاملاً */
+function addCut(div, m){
+  if (!div || !m || !m.cut) return div;
+  const el = document.createElement('div'); el.className = 'cutnote';
+  el.textContent = '⚠️ الرد انقطع: وصل للحد الأقصى للطول، فالنص غير كامل';
+  div.appendChild(el); return div;
+}
+/* البند 11: زر نسخ أسفل كل رد وخلاصة، ينسخ نص الرسالة كاملاً */
+function addCopy(div, text){
+  const bar = document.createElement('div'); bar.className = 'acts';
+  const b = document.createElement('button'); b.className = 'copybtn'; b.textContent = '⧉ نسخ'; b.title = 'نسخ الرسالة';
+  b.onclick = async () => {
+    try{ await navigator.clipboard.writeText(text); }
+    catch(e){
+      const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); }catch(_){} ta.remove();
+    }
+    b.textContent = '✓ نُسخ'; setTimeout(() => { b.textContent = '⧉ نسخ'; }, 1500);
+  };
+  bar.appendChild(b); div.appendChild(bar);
+  return div;
+}
 function setSendState(){
   sendBtn.textContent = busy ? '■' : '↑';
   sendBtn.classList.toggle('stop', busy);
@@ -1592,6 +1814,7 @@ function renderCostBox(){
 }
 document.getElementById('openSettings').onclick = () => {
   renderCostBox(); F('monthLimit').value = S.monthLimit || '';
+  F('permBlock').value = S.permBlock || '';
   F('trimAt').value = S.trimAt; F('keepLast').value = S.keepLast; F('cacheOn').checked = !!S.cacheOn;
   F('claudeKey').value = S.claudeKey; F('geminiKey').value = S.geminiKey;
   F('orKey').value = S.orKey; F('orModel').value = S.orModel;
@@ -1607,6 +1830,8 @@ document.getElementById('openSettings').onclick = () => {
 F('closeSettings').onclick = () => dlg.close();
 F('saveSettings').onclick = () => {
   S.monthLimit = Math.max(0, +F('monthLimit').value || 0); spendDismissed = '';
+  const newPerm = F('permBlock').value.trim();
+  if (newPerm !== (S.permBlock || '')){ alert('التعديل يبطّل الكاش مرة وحدة'); S.permBlock = newPerm; }
   S.trimAt = Math.max(8, Math.round(+F('trimAt').value) || DEFAULTS.trimAt);
   S.keepLast = Math.min(S.trimAt - 2, Math.max(2, Math.round(+F('keepLast').value) || DEFAULTS.keepLast));
   if ((S.trimAt - S.keepLast) % 2){ S.keepLast -= 1; alert('صُحّح «آخر» إلى ' + S.keepLast + ' حتى يبقى الفرق بين الرقمين زوجياً'); }
