@@ -288,8 +288,8 @@
   <div class="costbox" id="costBox"></div>
   <label>📚 السياق المرسل للنموذجين</label>
   <div style="display:flex;gap:8px;align-items:center;font-size:13px">
-    <span>حتى</span><input type="number" id="ctxMax" min="10" step="5" style="width:70px">
-    <span>رسالة، ثم تتقدم البداية</span><input type="number" id="ctxStep" min="5" step="5" style="width:70px"><span>رسالة دفعة واحدة</span>
+    <span>حتى</span><input type="number" id="trimAt" min="8" style="width:64px">
+    <span>رسالة، ثم يُقص الوسط ويبقى الأولى + آخر</span><input type="number" id="keepLast" min="2" style="width:56px"><span>رسالة</span>
   </div>
   <div class="hint">التقليص يخص ما يُرسل فقط، ومحادثاتك المحفوظة لا يُحذف منها شيء. تقدر تستثني أي محادثة من القائمة ☰ بزر 📌.</div>
   <div class="row"><input type="checkbox" id="cacheOn"> <span>تفعيل الكاش لـ Claude (يظهر تحت كل رد هل وفّر أم كلّف)</span></div>
@@ -383,7 +383,7 @@ async function openVault(uid, dek){
   }
   await flushVault();
 }
-const DEFAULTS = { ctxMax:40, ctxStep:20, cacheOn:true, monthLimit:0, ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
+const DEFAULTS = { trimAt:20, keepLast:6, cacheOn:true, monthLimit:0, ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
   geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
 let S = Object.assign({}, DEFAULTS);
 /* ===== المحادثات المحفوظة بأسماء (مثل Claude) ===== */
@@ -450,18 +450,27 @@ function systemPrompt(me){
 /* أين يبدأ ما يُرسل: حتى ctxMax يُرسل كل شيء، ثم تتقدم البداية ctxStep رسالة دفعة واحدة
    وتبقى ثابتة بين الدفعات، حتى لا ينكسر الكاش مع كل رسالة. المحادثة المعلّمة 📌 تُرسل كاملة */
 function curChat(){ return chats.find(c => c.id === currentId); }
+/* أول رسالة مثبتة دائماً. الهستري يكبر حتى trimAt، بعدها يُقص الوسط ويبقى: الأولى + آخر keepLast،
+   ثم يكبر من جديد حتى trimAt ويُقص مرة ثانية. بين القصّات تبقى البداية ثابتة فيشتغل الكاش.
+   يرجع بداية «الذيل» المرسل (0 = يُرسل كل شيء) */
 function ctxStart(n){
   const c = curChat();
   if (c && c.noTrim) return 0;
-  const max = +S.ctxMax || DEFAULTS.ctxMax, step = Math.min(max, +S.ctxStep || DEFAULTS.ctxStep);
+  const T = Math.max(8, +S.trimAt || DEFAULTS.trimAt);
+  let K = Math.min(T - 2, Math.max(2, +S.keepLast || DEFAULTS.keepLast));
+  if ((T - K) % 2) K -= 1;                        // الفرق زوجي دائماً
   n = n == null ? history.length : n;
-  return n <= max ? 0 : Math.ceil((n - max) / step) * step;
+  if (n <= T) return 0;
+  const step = T - K;                             // كم رسالة تُضاف بين قصّة وأخرى
+  return (n - K) - ((n - T - 1) % step);          // ثابتة خلال الدفعة، وتقفز عند كل قصّة
 }
 let lastCtx = { start:0, count:0 };
 async function buildTurns(me, extra){
   const turns = [];
   const start = ctxStart();
-  const recent = history.slice(start);
+  // نسخة جديدة فقط: history الأصلية لا تُعدّل أبداً (لا splice ولا حذف)
+  // الأولى مثبتة + الذيل. الرسالة لا تُقطع أبداً (مع صورها)، والأدوار المتتالية تُدمج تحت فلا يصير user ورا user
+  const recent = start ? [history[0], ...history.slice(start)] : history.slice(0);
   lastCtx = { start, count: recent.length };
   // الصور والملفات تُرسل كاملة فقط إذا كانت ضمن آخر 3 رسائل في المحادثة،
   // والأقدم يُستبدل بنص (الصورة تبقى عندك بالواجهة والمخزن). المحادثة المعلّمة 📌 تُرسل مرفقاتها كاملة
@@ -470,6 +479,7 @@ async function buildTurns(me, extra){
   for (const m of recent){
     const role = m.who === me ? 'assistant' : 'user';
     let text = role === 'assistant' ? m.text : `[${LABEL[m.who]}]: ${m.text}`;
+    if (start && m === history[start]) text = `[ملاحظة: حُذفت ${start - 1} رسالة من وسط المحادثة لتوفير التكلفة]\n` + text;
     const atts = [];
     if (m.atts && m.atts.length){
       if (keepAll || history.indexOf(m) >= keepFrom){
@@ -705,7 +715,7 @@ async function callClaude(turns, system, onDelta){
     }
   });
   // Anthropic ترجّع عدد التوكنز الفعلي، والسعر من قائمة OpenRouter (تقدير)
-  lastUsage = { inTok, outTok, usd: claudeUsd(inBase, cw, cr, outTok), est: true, cw, cr };
+  lastUsage = { inTok, outTok, usd: claudeUsd(inBase, cw, cr, outTok), est: true, cw, cr, inBase };
   return text.trim();
 }
 
@@ -913,7 +923,7 @@ function updateTrimUI(){
   const el = chat.querySelector(`[data-idx="${start}"]`);
   if (!el) return;
   const line = document.createElement('div'); line.className = 'trimline';
-  line.textContent = `الرسائل فوق هذا الخط (${start}) محفوظة عندك ولا تُرسل للنماذج`;
+  line.textContent = `الرسائل من 2 إلى ${start} فوق هذا الخط محفوظة عندك ولا تُرسل (الأولى مثبتة وتُرسل دائماً)`;
   el.before(line);
 }
 function chatSpend(){
@@ -973,6 +983,10 @@ async function speak(who, extra, isSummary){
       cost.sent = lastCtx.count; if (lastCtx.start) cost.from = lastCtx.start;
     }
     if (cost && cost.usd) addSpend(who === 'claude' ? 'claude' : 'gemini', cost.usd);
+    // السجل: القيم الفعلية من usage (Claude: من حدثي message_start وmessage_delta في البث)
+    if (lastUsage) console.log(who === 'claude'
+      ? `[المجلس] claude: input_tokens=${lastUsage.inBase || 0} output_tokens=${lastUsage.outTok || 0} cache_read_input_tokens=${lastUsage.cr || 0} cache_creation_input_tokens=${lastUsage.cw || 0} رسائل_مرسلة=${lastCtx.count}`
+      : `[المجلس] gemini: prompt_tokens=${lastUsage.inTok || 0} completion_tokens=${lastUsage.outTok || 0} cached_tokens=${lastUsage.cr || 0} cache_write_tokens=${lastUsage.cw || 0} رسائل_مرسلة=${lastCtx.count}`);
     // رد فارغ أو [تم] = لا يوجد شيء جديد يضيفه: نتجاوزه بهدوء وننهي النقاش
     if (!text || /^\[?\s*تم\s*\]?\.?$/.test(text)){ if (live) live.remove(); return 'done'; }
     const m = { who, text, ts:Date.now(), model: who === 'claude' ? S.claudeModel : lastModel };
@@ -1578,7 +1592,7 @@ function renderCostBox(){
 }
 document.getElementById('openSettings').onclick = () => {
   renderCostBox(); F('monthLimit').value = S.monthLimit || '';
-  F('ctxMax').value = S.ctxMax; F('ctxStep').value = S.ctxStep; F('cacheOn').checked = !!S.cacheOn;
+  F('trimAt').value = S.trimAt; F('keepLast').value = S.keepLast; F('cacheOn').checked = !!S.cacheOn;
   F('claudeKey').value = S.claudeKey; F('geminiKey').value = S.geminiKey;
   F('orKey').value = S.orKey; F('orModel').value = S.orModel;
   F('ttsEngine').value = S.ttsEngine;
@@ -1593,8 +1607,9 @@ document.getElementById('openSettings').onclick = () => {
 F('closeSettings').onclick = () => dlg.close();
 F('saveSettings').onclick = () => {
   S.monthLimit = Math.max(0, +F('monthLimit').value || 0); spendDismissed = '';
-  S.ctxMax = Math.max(10, Math.round(+F('ctxMax').value) || DEFAULTS.ctxMax);
-  S.ctxStep = Math.min(S.ctxMax, Math.max(5, Math.round(+F('ctxStep').value) || DEFAULTS.ctxStep));
+  S.trimAt = Math.max(8, Math.round(+F('trimAt').value) || DEFAULTS.trimAt);
+  S.keepLast = Math.min(S.trimAt - 2, Math.max(2, Math.round(+F('keepLast').value) || DEFAULTS.keepLast));
+  if ((S.trimAt - S.keepLast) % 2){ S.keepLast -= 1; alert('صُحّح «آخر» إلى ' + S.keepLast + ' حتى يبقى الفرق بين الرقمين زوجياً'); }
   S.cacheOn = F('cacheOn').checked;
   S.claudeKey = F('claudeKey').value.trim(); S.geminiKey = F('geminiKey').value.trim();
   S.orKey = F('orKey').value.trim(); S.orModel = F('orModel').value.trim() || DEFAULTS.orModel;
@@ -1735,7 +1750,7 @@ function toggleNoTrim(c){
       `\n\nوتكبر التكلفة كلما طالت المحادثة. موافق؟`)) return;
     c.noTrim = true;
   } else {
-    if (!confirm(`إلغاء 📌 عن «${c.title}»؟ سيُرسل آخر ${S.ctxMax} رسالة تقريباً فقط.`)) return;
+    if (!confirm(`إلغاء 📌 عن «${c.title}»؟ ستُرسل الأولى + آخر ${S.keepLast} إلى ${S.trimAt - 1} رسالة فقط.`)) return;
     c.noTrim = false;
   }
   store.set('majlis_chats', chats); renderChatList(); if (c.id === currentId) updateTrimUI();
