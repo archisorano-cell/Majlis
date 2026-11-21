@@ -134,6 +134,10 @@
   .cbtns .end{background:var(--err);border-color:var(--err);color:#fff}
   .chint{font-size:12px;color:var(--muted)}
 
+  /* خط القطع والمحادثة الكاملة */
+  .trimline{align-self:stretch;text-align:center;font-size:12px;color:var(--muted);border-top:1px dashed var(--line);padding-top:6px;margin:4px 0}
+  .fullnote{align-self:stretch;text-align:center;font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px}
+  .citem button.on{color:var(--claude)}
   /* التكلفة والتنبيهات */
   .costline{font-size:11px;color:var(--muted);margin-top:6px;direction:rtl}
   #chatCost{font-size:12px;color:var(--muted);white-space:nowrap;direction:ltr}
@@ -282,6 +286,13 @@
   </div>
   <label>💰 التكلفة هذا الشهر</label>
   <div class="costbox" id="costBox"></div>
+  <label>📚 السياق المرسل للنموذجين</label>
+  <div style="display:flex;gap:8px;align-items:center;font-size:13px">
+    <span>حتى</span><input type="number" id="ctxMax" min="10" step="5" style="width:70px">
+    <span>رسالة، ثم تتقدم البداية</span><input type="number" id="ctxStep" min="5" step="5" style="width:70px"><span>رسالة دفعة واحدة</span>
+  </div>
+  <div class="hint">التقليص يخص ما يُرسل فقط، ومحادثاتك المحفوظة لا يُحذف منها شيء. تقدر تستثني أي محادثة من القائمة ☰ بزر 📌.</div>
+  <div class="row"><input type="checkbox" id="cacheOn"> <span>تفعيل الكاش لـ Claude (يظهر تحت كل رد هل وفّر أم كلّف)</span></div>
   <label>حدّ الصرف الشهري بالدولار (0 = بدون حد)</label>
   <input type="number" id="monthLimit" min="0" step="0.5">
   <div class="hint">الأرقام تقديرية والتسعيرة من OpenRouter. تكلفة Gemini والصوت عبر OpenRouter فعلية، وتكلفة Claude تقدير (توكنز × التسعيرة). قارنها بلوحتي OpenRouter وClaude Console.</div>
@@ -372,7 +383,7 @@ async function openVault(uid, dek){
   }
   await flushVault();
 }
-const DEFAULTS = { monthLimit:0, ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
+const DEFAULTS = { ctxMax:40, ctxStep:20, cacheOn:true, monthLimit:0, ttsEngine:'gemini', claudeVoice:'Orus', geminiVoice:'Kore', orKey:'', orModel:'google/gemini-3.1-pro-preview', claudeKey:'', geminiKey:'', claudeModel:'claude-sonnet-5-5',
   geminiModel:'gemini-3.8-flash', rounds:2, autoSend:false, tts:false, mode:'both' };
 let S = Object.assign({}, DEFAULTS);
 /* ===== المحادثات المحفوظة بأسماء (مثل Claude) ===== */
@@ -436,9 +447,22 @@ function systemPrompt(me){
 /* يحوّل السجل المشترك إلى أدوار يفهمها كل نموذج: رسائله = assistant، والباقي = user موسوم بالاسم */
 /* كل دور = { role, text, atts:[{mime,data,name}] }
    المرفقات تُرسل كاملة فقط لآخر 3 رسائل فيها مرفقات (لتوفير التكلفة)، والأقدم يُذكر اسمها فقط */
+/* أين يبدأ ما يُرسل: حتى ctxMax يُرسل كل شيء، ثم تتقدم البداية ctxStep رسالة دفعة واحدة
+   وتبقى ثابتة بين الدفعات، حتى لا ينكسر الكاش مع كل رسالة. المحادثة المعلّمة 📌 تُرسل كاملة */
+function curChat(){ return chats.find(c => c.id === currentId); }
+function ctxStart(n){
+  const c = curChat();
+  if (c && c.noTrim) return 0;
+  const max = +S.ctxMax || DEFAULTS.ctxMax, step = Math.min(max, +S.ctxStep || DEFAULTS.ctxStep);
+  n = n == null ? history.length : n;
+  return n <= max ? 0 : Math.ceil((n - max) / step) * step;
+}
+let lastCtx = { start:0, count:0 };
 async function buildTurns(me, extra){
   const turns = [];
-  const recent = history.slice(-60);
+  const start = ctxStart();
+  const recent = history.slice(start);
+  lastCtx = { start, count: recent.length };
   const withAtts = recent.filter(m => m.atts && m.atts.length).slice(-3);
   for (const m of recent){
     const role = m.who === me ? 'assistant' : 'user';
@@ -626,19 +650,35 @@ function monthSpend(){ const m = monthParts(); return (m.claude || 0) + (m.gemin
 const fmtUsd = v => '$' + (v < 0.01 ? v.toFixed(4) : v < 1 ? v.toFixed(3) : v.toFixed(2));
 const fmtTok = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
 
+/* جسم طلب Claude. مع الكاش: نقطة على التعليمات الثابتة، ونقطة على آخر رد كامل لـ Claude
+   (هذا الجزء لا يتغير في الطلبات التالية، فيُقرأ من الكاش بدل أن يُدفع كاملاً) */
+function claudeBody(turns, system){
+  const messages = turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
+    ? [ ...t.atts.map(a => a.mime === 'application/pdf'
+          ? { type:'document', source:{ type:'base64', media_type:a.mime, data:a.data } }
+          : { type:'image', source:{ type:'base64', media_type:a.mime, data:a.data } }),
+        { type:'text', text:t.text } ]
+    : t.text }));
+  const body = { model:S.claudeModel, max_tokens: inCall ? 500 : 1500, system, stream: true, messages };
+  if (S.cacheOn){
+    body.system = [{ type:'text', text: system, cache_control:{ type:'ephemeral' } }];
+    let k = -1;
+    for (let i = messages.length - 2; i >= 0; i--) if (messages[i].role === 'assistant'){ k = i; break; }
+    if (k >= 0){
+      const m = messages[k];
+      if (typeof m.content === 'string') m.content = [{ type:'text', text: m.content }];
+      m.content[m.content.length - 1].cache_control = { type:'ephemeral' };
+    }
+  }
+  return body;
+}
 async function callClaude(turns, system, onDelta){
   if (!S.claudeKey) throw new Error('ضع مفتاح Claude في الإعدادات ⚙️');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'x-api-key':S.claudeKey,
       'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
-    body: JSON.stringify({ model:S.claudeModel, max_tokens: inCall ? 500 : 1500, system, stream: true,
-      messages: turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
-        ? [ ...t.atts.map(a => a.mime === 'application/pdf'
-              ? { type:'document', source:{ type:'base64', media_type:a.mime, data:a.data } }
-              : { type:'image', source:{ type:'base64', media_type:a.mime, data:a.data } }),
-            { type:'text', text:t.text } ]
-        : t.text })) })
+    body: JSON.stringify(claudeBody(turns, system))
   });
   if (!r.ok){
     const d = await r.json().catch(() => ({}));
@@ -752,8 +792,10 @@ async function callOpenRouter(turns, system, onDelta){
     if (ev.model) lastModel = ev.model.replace(/^google\//, '');
     if (ev.usage){
       const u = ev.usage, actual = typeof u.cost === 'number';
+      const det = u.prompt_tokens_details || {};
       lastUsage = { inTok: u.prompt_tokens || 0, outTok: u.completion_tokens || 0,
-        usd: actual ? u.cost : estimateUsd(model, u.prompt_tokens, u.completion_tokens), est: !actual };
+        usd: actual ? u.cost : estimateUsd(model, u.prompt_tokens, u.completion_tokens), est: !actual,
+        cr: det.cached_tokens || 0, cw: det.cache_write_tokens || 0, model };
     }
     const c = ev.choices && ev.choices[0] && ev.choices[0].delta && ev.choices[0].delta.content;
     if (c){ text += c; if (onDelta) onDelta(text); }
@@ -807,18 +849,68 @@ function renderAll(){
     n.innerHTML = '<b>✳ مجلس الثلاثة</b><br>اكتب فكرتك أو سجّلها بصوتك.<br>«يردّان مرة»: كل واحد يرد بالدور.<br>«نقاش + خلاصة»: يتناقشان فيما بينهما ثم يعطونك الخلاصة.';
     chat.appendChild(n);
   }
-  history.forEach(m => appendCost(bubble(m.who, m.text, m.summary ? 'summary' : '', m.model, m.atts), m));
+  history.forEach((m, i) => { const d = appendCost(bubble(m.who, m.text, m.summary ? 'summary' : '', m.model, m.atts), m); d.dataset.idx = i; });
+  updateTrimUI();
   updateCostUI();
 }
 /* سطر صغير تحت كل رد: التكلفة وحجم السياق المرسل */
+/* حالة الكاش وفرقها عن نفس الطلب بدون كاش */
+function cacheInfo(who, u){
+  const c = curChat();
+  const key = 'ls_' + who;                                              // لكل نموذج كاشه الخاص
+  const moved = c && c[key] != null && c[key] !== lastCtx.start;       // تقدّمت البداية منذ طلبه السابق
+  if (c){ c[key] = lastCtx.start; store.set('majlis_chats', chats); }
+  const cr = u.cr || 0, cw = u.cw || 0;
+  const st = cr > 0 ? 'read' : cw > 0 ? 'write' : 'none';
+  if (who === 'claude' && !S.cacheOn) return { st:'off' };
+  let diff = null;
+  const pr = priceFor(who === 'claude' ? 'anthropic/' + S.claudeModel : (u.model || ''));
+  if (pr){
+    const crP = pr.cr != null ? pr.cr : null, cwP = pr.cw != null ? pr.cw : null;
+    // الفرق = (سعرها لو كانت دخولاً عادياً) - (سعرها الفعلي بالكاش). موجب = توفير
+    if (crP != null || cwP != null) diff = cr * (pr.i - (crP != null ? crP : pr.i)) + cw * (pr.i - (cwP != null ? cwP : pr.i));
+  }
+  return { st, diff, trim: !!(moved && st !== 'read') };
+}
 function appendCost(div, m){
   if (!div || !m || !m.cost) return div;
   const c = m.cost, el = document.createElement('div'); el.className = 'costline';
   const price = c.free ? 'مجاني (Google)' : (c.usd == null ? 'السعر غير متوفر' : (c.est ? '≈ ' : '') + fmtUsd(c.usd));
-  el.textContent = price + (c.inTok ? ' · السياق المرسل ' + fmtTok(c.inTok) + ' توكن' : '');
+  let txt = price + (c.inTok ? ' · السياق المرسل ' + fmtTok(c.inTok) + ' توكن' : '');
+  if (c.sent && c.from) txt += ` (آخر ${c.sent} رسالة)`;
+  if (c.cache){
+    const k = c.cache;
+    const lab = { read:'قراءة', write:'كتابة', none:'لم يعمل', off:'متوقف' }[k.st] || k.st;
+    let d = '';
+    if (k.diff != null && Math.abs(k.diff) >= 0.00001) d = k.diff > 0 ? ` (وفّر ${fmtUsd(k.diff)})` : ` (كلّف ${fmtUsd(-k.diff)} زيادة)`;
+    txt += ' · كاش: ' + lab + (k.trim ? ' بسبب التقليص' : '') + d;
+  }
+  el.textContent = txt;
   el.title = c.est ? 'تقدير: عدد التوكنز × تسعيرة OpenRouter' : 'تكلفة فعلية من OpenRouter';
   div.appendChild(el);
   return div;
+}
+/* خط القطع في المحادثة + ملاحظة المحادثة الكاملة 📌 */
+function updateTrimUI(){
+  if (!chat) return;
+  chat.querySelectorAll('.trimline, .fullnote').forEach(x => x.remove());
+  const c = curChat();
+  if (c && c.noTrim){
+    const n = document.createElement('div'); n.className = 'fullnote';
+    const tok = Math.round(history.reduce((a, m) => a + (m.text || '').length, 0) / 2.5);
+    const per = claudeUsd(tok, 0, 0, 0);
+    n.textContent = `📌 هذه المحادثة تُرسل كاملة للنموذجين (${history.length} رسالة ≈ ${fmtTok(tok)} توكن` +
+      (per ? `، ≈ ${fmtUsd(per)} إدخال لكل رد من Claude بدون كاش` : '') + ')';
+    chat.prepend(n);
+    return;
+  }
+  const start = ctxStart();
+  if (!start) return;
+  const el = chat.querySelector(`[data-idx="${start}"]`);
+  if (!el) return;
+  const line = document.createElement('div'); line.className = 'trimline';
+  line.textContent = `الرسائل فوق هذا الخط (${start}) محفوظة عندك ولا تُرسل للنماذج`;
+  el.before(line);
 }
 function chatSpend(){
   const c = chats.find(c => c.id === currentId);
@@ -871,6 +963,11 @@ async function speak(who, extra, isSummary){
     // التكلفة تُحسب حتى لو انسحب الطرف بـ[تم]، لأن الطلب نفسه مدفوع
     const cost = lastUsage ? { usd: lastUsage.usd, est: !!lastUsage.est, free: !!lastUsage.free,
       inTok: lastUsage.inTok || 0, outTok: lastUsage.outTok || 0 } : null;
+    if (cost && !cost.free){
+      const ci = cacheInfo(who, lastUsage);
+      if (ci) cost.cache = ci;
+      cost.sent = lastCtx.count; if (lastCtx.start) cost.from = lastCtx.start;
+    }
     if (cost && cost.usd) addSpend(who === 'claude' ? 'claude' : 'gemini', cost.usd);
     // رد فارغ أو [تم] = لا يوجد شيء جديد يضيفه: نتجاوزه بهدوء وننهي النقاش
     if (!text || /^\[?\s*تم\s*\]?\.?$/.test(text)){ if (live) live.remove(); return 'done'; }
@@ -879,8 +976,10 @@ async function speak(who, extra, isSummary){
     if (cost) m.cost = cost;
     history.push(m); saveAll();
     const fin = bubble(who, text, cls, m.model);
+    fin.dataset.idx = history.length - 1;
     appendCost(fin, m); updateCostUI();
     if (live){ live.replaceWith(fin); }
+    updateTrimUI();
     // باقي النص الذي لم يُقرأ بعد (أو كله إذا لم يكن الرد متدفقاً)
     const tail = text.slice(Math.min(spoken, text.length));
     if (tail.trim()) sayTail(who, tail);
@@ -940,7 +1039,7 @@ async function send(){
   const um = { who:'user', text, ts:Date.now() };
   if (atts.length) um.atts = atts;
   history.push(um); saveAll();
-  if (history.length === 1) renderAll(); else bubble('user', text, '', '', atts);
+  if (history.length === 1) renderAll(); else { bubble('user', text, '', '', atts).dataset.idx = history.length - 1; updateTrimUI(); }
 
   busy = true; stopRequested = false; setSendState();
   try{
@@ -1475,6 +1574,7 @@ function renderCostBox(){
 }
 document.getElementById('openSettings').onclick = () => {
   renderCostBox(); F('monthLimit').value = S.monthLimit || '';
+  F('ctxMax').value = S.ctxMax; F('ctxStep').value = S.ctxStep; F('cacheOn').checked = !!S.cacheOn;
   F('claudeKey').value = S.claudeKey; F('geminiKey').value = S.geminiKey;
   F('orKey').value = S.orKey; F('orModel').value = S.orModel;
   F('ttsEngine').value = S.ttsEngine;
@@ -1489,6 +1589,9 @@ document.getElementById('openSettings').onclick = () => {
 F('closeSettings').onclick = () => dlg.close();
 F('saveSettings').onclick = () => {
   S.monthLimit = Math.max(0, +F('monthLimit').value || 0); spendDismissed = '';
+  S.ctxMax = Math.max(10, Math.round(+F('ctxMax').value) || DEFAULTS.ctxMax);
+  S.ctxStep = Math.min(S.ctxMax, Math.max(5, Math.round(+F('ctxStep').value) || DEFAULTS.ctxStep));
+  S.cacheOn = F('cacheOn').checked;
   S.claudeKey = F('claudeKey').value.trim(); S.geminiKey = F('geminiKey').value.trim();
   S.orKey = F('orKey').value.trim(); S.orModel = F('orModel').value.trim() || DEFAULTS.orModel;
   S.ttsEngine = F('ttsEngine').value; S.claudeVoice = F('claudeVoice').value; S.geminiVoice = F('geminiVoice').value;
@@ -1595,6 +1698,10 @@ function renderChatList(){
     const row = document.createElement('div');
     row.className = 'citem' + (c.id === currentId ? ' active' : '');
     const t = document.createElement('span'); t.className = 't'; t.textContent = c.title;
+    const pin = document.createElement('button'); pin.textContent = '📌';
+    pin.title = c.noTrim ? 'تُرسل كاملة (اضغط لإلغاء)' : 'لا تقلّص هذه المحادثة';
+    if (c.noTrim) pin.className = 'on'; else pin.style.opacity = '.35';
+    pin.onclick = e => { e.stopPropagation(); toggleNoTrim(c); };
     const ren = document.createElement('button'); ren.textContent = '✎'; ren.title = 'تغيير الاسم';
     const del = document.createElement('button'); del.textContent = '🗑'; del.title = 'حذف';
     row.onclick = () => openChat(c.id);
@@ -1609,9 +1716,25 @@ function renderChatList(){
       if (!chats.length){ const id = 'c' + Date.now(); chats = [{ id, title:'محادثة جديدة', updated:Date.now() }]; store.set('majlis_chat_' + id, []); }
       if (c.id === currentId){ currentId = chats[0].id; history = store.get('majlis_chat_' + currentId, []); renderAll(); }
       saveAll(); };
-    row.append(t, ren, del); chatList.appendChild(row);
+    row.append(t, pin, ren, del); chatList.appendChild(row);
   });
   updateTitle();
+}
+/* 📌 لا تقلّص هذه المحادثة: يختاره المستخدم فقط، ويُحفظ مع المحادثة */
+function toggleNoTrim(c){
+  if (!c.noTrim){
+    const h = c.id === currentId ? history : store.get('majlis_chat_' + c.id, []);
+    const tok = Math.round(h.reduce((a, m) => a + (m.text || '').length, 0) / 2.5);
+    const per = claudeUsd(tok, 0, 0, 0);
+    if (!confirm(`📌 «${c.title}» ستُرسل كاملة للنموذجين مع كل رد.\n\nحجمها الآن: ${h.length} رسالة ≈ ${fmtTok(tok)} توكن` +
+      (per ? `\nتكلفة الإدخال التقريبية لكل رد من Claude: ≈ ${fmtUsd(per)} (أقل مع الكاش)` : '') +
+      `\n\nوتكبر التكلفة كلما طالت المحادثة. موافق؟`)) return;
+    c.noTrim = true;
+  } else {
+    if (!confirm(`إلغاء 📌 عن «${c.title}»؟ سيُرسل آخر ${S.ctxMax} رسالة تقريباً فقط.`)) return;
+    c.noTrim = false;
+  }
+  store.set('majlis_chats', chats); renderChatList(); if (c.id === currentId) updateTrimUI();
 }
 function updateTitle(){
   const c = chats.find(c => c.id === currentId);
