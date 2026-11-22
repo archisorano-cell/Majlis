@@ -77,6 +77,12 @@
   textarea::placeholder{color:var(--muted)}
   .tools{display:flex;align-items:center;gap:6px}
   .tools .spacer{flex:1}
+  header h1{display:flex;align-items:center;gap:2px;min-width:30px}
+  #chatTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  header #briefBtn{flex-shrink:0;padding:4px 2px;font-size:17px}
+  #briefBtn.has{filter:none;background:#243424;outline:1px solid var(--ok)}
+  #briefText{width:100%;min-height:220px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px;resize:vertical}
+  #briefFiles{font-size:13px;color:var(--muted);margin:6px 0}
   .round{width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:transparent;
     font-size:17px;flex:none;cursor:pointer;display:grid;place-items:center}
   #attach{font-size:22px;font-weight:300}
@@ -196,11 +202,11 @@
 <body>
 <header>
   <button class="icon" id="openDrawer" title="المحادثات">☰</button>
-  <h1 id="chatTitle">مجلس الثلاثة</h1>
+  <h1><button class="icon" id="briefBtn" title="موجز المحادثة">📋</button><span id="chatTitle">مجلس الثلاثة</span></h1>
   <span id="chatCost" title="تكلفة هذه المحادثة (تقديرية)"></span>
   <select id="mode" aria-label="طريقة الرد">
-    <option value="both">يردّان مرة</option>
-    <option value="debate">نقاش + خلاصة</option>
+    <option value="both" title="يردّان مرة">رد مرة</option>
+    <option value="debate" title="نقاش + خلاصة">نقاش</option>
   </select>
   <button class="icon" id="filesBtn" title="ملفات المحادثة" hidden>📎<span id="filesCount"></span></button>
   <button class="icon" id="ecoBtn" title="الوضع الاقتصادي: Flash وHaiku">💰</button>
@@ -277,6 +283,19 @@
     </div>
   </div>
 </footer>
+
+<dialog id="briefDlg">
+  <h2>📋 موجز المحادثة</h2>
+  <div class="hint">اكتب اللي تريده من هاي المحادثة. ينرسل ويا كل رسالة، والقص والخلاصات ما يمسونه. اترك أي سطر فارغ إذا ما تحتاجه.</div>
+  <textarea id="briefText"></textarea>
+  <div id="briefFiles"></div>
+  <div class="btns">
+    <button class="btn" id="briefAttach">📎 إرفاق ملف</button>
+    <button class="btn" id="briefSave">حفظ</button>
+    <button class="btn primary" id="briefStart">ابدأ</button>
+    <button class="btn" id="briefClose">إغلاق</button>
+  </div>
+</dialog>
 
 <dialog id="filesDlg">
   <h2>📎 ملفات المحادثة</h2>
@@ -483,6 +502,8 @@ function systemPrompt(me){
 الرسائل تصلك موسومة بأسماء أصحابها مثل [المستخدم] و[${o}]. لا تكتب وسم اسمك في بداية ردك، التطبيق يضيفه.
 لا تتكلم نيابةً عن ${o} ولا تكتب رده.
 خاطب المستخدم مباشرة بصيغة «أنت»، ولا تكتب «@المستخدم» أو «[المستخدم]» في ردك.
+لا تذكر رقم مادة قانونية أو اقتباساً من كتاب أو مصدر إلا إذا كان موجوداً في ملف مرفق، وإذا كان من معلوماتك العامة فاكتب جنبه: (غير موثق، يحتاج تأكيد).
+إذا وُجد «موجز المحادثة» فالتزم بهدفه وخطوطه الحمراء دائماً، وأي اقتراح يخالفها مرفوض.
 بالنقاشات: ادخلوا مباشرة بنقاط الخلاف فقط، بدون مجاملة («أتفق مع زميلي»، «نقطة ممتازة») ولا تمهيد ولا إعادة كلام الطرف الآخر ولا تلخيص بالنهاية. كحد أقصى 3 ردود من كل موديل بعد رسالة المستخدم. إذا اتفقتما ولم يبق خلاف، اكتب [تم] فقط بدون أي كلمة أخرى، والتطبيق يقرر متى تُكتب الخلاصة ومن يكتبها.`;
 }
 
@@ -535,6 +556,8 @@ function ctxSystemParts(){
   const parts = [];
   const perm = (S.permBlock || '').trim();
   if (perm) parts.push('[أوامر دائمة من المستخدم، التزم بها دائماً]\n' + perm);
+  const brief = (ctxRec().brief || '').trim();   // موجز هذه المحادثة: يُرسل دائماً، حتى بمحادثات 📌، ولا يمسه القص ولا الخلاصات
+  if (brief) parts.push('[موجز هذه المحادثة من المستخدم: الموضوع والهدف والخطوط الحمراء. التزم به دائماً]\n' + brief);
   const c = curChat();
   if (!(c && c.noTrim)){
     const { list } = activeSummaries();
@@ -789,7 +812,7 @@ function claudeBody(turns, system){
         { type:'text', text:t.text } ]
     : t.text }));
   const parts = Array.isArray(system) ? system : [system];
-  const body = { model:claudeModelNow(), max_tokens: inCall ? 500 : (sumCall ? 4000 : 1500), system: parts.join('\n\n'), stream: true, messages };
+  const body = { model:claudeModelNow(), max_tokens: inCall ? 500 : 16000, system: parts.join('\n\n'), stream: true, messages };
   if (S.cacheOn){
     // كل جزء كتلة مستقلة، ونقطة الكاش على آخرها (التعليمات + الأوامر الدائمة + الخلاصات ثابتة بين الطلبات)
     body.system = parts.map(x => ({ type:'text', text: x }));
@@ -847,8 +870,8 @@ function setStatus(t){ if (typingEl) typingEl.lastChild.textContent = t; }
 function genConfig(model){
   // thinkingLevel لنماذج Gemini 3 فقط؛ النماذج الأقدم (2.5) لا تقبله
   return /^gemini-[3-9]/.test(model)
-    ? { maxOutputTokens: sumCall ? 8000 : 4000, thinkingConfig:{ thinkingLevel:'low' } }
-    : { maxOutputTokens: sumCall ? 8000 : 4000 };   // الحد يشمل تفكير Gemini الداخلي، والخلاصة أطول
+    ? { maxOutputTokens: 16000, thinkingConfig:{ thinkingLevel:'low' } }
+    : { maxOutputTokens: 16000 };   // الحد يشمل تفكير Gemini الداخلي. الدفع على ما يُكتب فعلاً فقط
 }
 
 async function geminiRequest(body, withConfig){
@@ -906,7 +929,7 @@ async function callOpenRouter(turns, system, onDelta){
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
-    body: JSON.stringify({ model, max_tokens: inCall ? 800 : (sumCall ? 8000 : 4000), reasoning:{ effort:'low' }, stream: true, usage:{ include: true },
+    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 16000, reasoning:{ effort:'low' }, stream: true, usage:{ include: true },
       messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
         ? [ ...t.atts.map(a => a.mime === 'application/pdf'
               ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
@@ -980,7 +1003,7 @@ function bubble(who, text, cls, model, atts){
 let renderingAll = false;
 /* keep = يبقى مكان القراءة كما هو (بعد خلاصة أو تراجع). بدونه: فتح المحادثة ينزل للأسفل */
 function renderAll(keep){
-  updateFilesUI();
+  updateFilesUI(); updateBriefUI();
   const y = chat.scrollTop, ui = unseenEl && unseenEl.dataset.idx;
   renderingAll = true;
   chat.innerHTML = '';
@@ -1252,9 +1275,9 @@ async function send(){
         // جواب واحد بلا خلاف = لا خلاصة، ويبقى السؤال والجواب ضمن الرسائل المفتوحة
         // أدوار: الأول يراجع بقائمة مرقّمة، الثاني يكتب الاختلاف والإضافات فقط، والباقي على المختلف عليه بالرقم
         const ROLE = [
-          ' أنت المراجِع الأول: اكتب رأيك كقائمة مرقّمة (1، 2، 3…)، واذكر رقم البند في الملف إن وُجد. اكتب كل نقطة بالطول اللي تحتاجه، بدون حشو. لا مقدمة ولا خاتمة ولا مجاملة.',
-          ' لا تكرر ولا تذكر ولا تلخّص أي نقطة توافق عليها، ولا تكتب «أتفق مع…». اكتب فقط (بالطول اللي تحتاجه كل نقطة، بدون حشو): نقاطاً جديدة فاتته (أكمل ترقيمه)، واعتراضك على نقطة معيّنة برقمها مع سببك وبديلك. إذا توافق على كل شيء ولا إضافة عندك، اكتب فقط: [تم]',
-          ' ناقش فقط النقاط اللي بقي عليها خلاف، بأرقامها. النقطة اللي انحسمت لا تذكرها. بدون مجاملة ولا إعادة كلام الطرف الآخر. إذا حُسمت كل نقاط الخلاف، اكتب فقط: [تم]'
+          ' أنت المراجِع الأول: اكتب رأيك كقائمة مرقّمة (1، 2، 3…) مرتّبة من الأخطر للأقل، وغطِّ كل شيء، واذكر رقم البند في الملف إن وُجد. التزم بموجز المحادثة وخطوطه الحمراء إن وُجد. اكتب كل نقطة بالطول اللي تحتاجه، بدون حشو. لا مقدمة ولا خاتمة ولا مجاملة.',
+          ' لا تكرر ولا تذكر ولا تلخّص أي نقطة توافق عليها، ولا تكتب «أتفق مع…». اكتب فقط (بالطول اللي تحتاجه كل نقطة، بدون حشو): نقاطاً جديدة فاتته (أكمل ترقيمه، والأخطر أولاً)، واعتراضك على نقطة معيّنة برقمها مع سببك وبديلك. وإذا نقطة تخالف موجز المحادثة أو خطوطه الحمراء فارفضها برقمها واذكر الخط الذي تكسره. إذا توافق على كل شيء ولا إضافة عندك، اكتب فقط: [تم]',
+          ' ناقش فقط النقاط اللي بقي عليها خلاف، بأرقامها. النقطة اللي انحسمت لا تذكرها. أي اقتراح يكسر الخطوط الحمراء بالموجز مرفوض. بدون مجاملة ولا إعادة كلام الطرف الآخر. إذا حُسمت كل نقاط الخلاف، اكتب فقط: [تم]'
         ];
         const userQs = history.slice(activeSummaries().lastIdx + 1).filter(m => m.who === 'user').length;   // يشمل سؤالك الحالي
         let summarized = false, agreedBy = null, lastWho = null, real = 0, capped = true;
@@ -1288,7 +1311,8 @@ async function send(){
 const SUMMARY_NOTE = 'اكتب الخلاصة الآن بهذا القالب بالضبط. أول سطر في ردك [خلاصة] وحده بدون أي شيء قبله. '
   + 'لا تذكر أسماء الموديلات ولا «قال فلان». تغطي كل الرسائل منذ آخر خلاصة (أو من بداية المحادثة)، حتى لو انقطع النقاش. الأقسام بالترتيب:\n'
   + '**الملف وأوامري:** اسم الملف أو الملفات المعنية فقط (الملف الأصلي يبقى مرفقاً مع كل رسالة، فلا تعِد كتابة محتواه، ولا تعِد وصف ملف ذُكر بخلاصة سابقة)، ثم كل أسئلة المستخدم وأوامره منذ آخر خلاصة بصياغته الحرفية مختصرة وبدون أجوبتها.\n'
-  + '**الاتفاق:** القائمة النهائية الموحدة، كل قرار أو تغيير بسطر مع رقم البند إن وُجد، ومعها النتيجة المهمة لكل سؤال انجاوب بجواب واحد بدون نقاش. هذا أهم قسم.\n'
+  + '**الاتفاق:** هذا أهم قسم. لكل بند معدّل: رقمه، والمشكلة باختصار، ونصه الجديد المتفق عليه كاملاً. ولكل بند مقترح جديد: نصه كاملاً وأين يوضع. '
+  + 'والقرارات الأخرى كل قرار بسطر، ومعها النتيجة المهمة لكل سؤال انجاوب بجواب واحد بدون نقاش. لا تذكر البنود السليمة، ولا تعِد كتابة الملف كله، ولا تعِد كتابة موجز المحادثة.\n'
   + '**الخلاف:** فقط إذا بقي خلاف: النقطة برقمها والخيارات، والقرار للمستخدم.\n'
   + 'احذف أي قسم فارغ تماماً ولا تكتب «لا يوجد». الأرقام والأكواد حرفياً.';
 /* البند 9: إذا فشل رد الخلاصة (خطأ أو لم يبدأ بـ[خلاصة]) نعيد مرة واحدة، ثم نؤجل التقليص */
@@ -1481,6 +1505,36 @@ function renderFilesDlg(){
 }
 document.getElementById('filesBtn').onclick = () => { renderFilesDlg(); document.getElementById('filesDlg').showModal(); };
 document.getElementById('closeFiles').onclick = () => document.getElementById('filesDlg').close();
+/* موجز المحادثة: نص خاص بكل محادثة (حقل اختياري في سجلها)، والملفات المرفقة منه تصير ملفات المحادثة 📎 */
+const BRIEF_TPL = 'الموضوع: \nالهدف: \nخطوطي الحمرة: \nشكل النتيجة اللي أريدها: \nمعلومات مهمة عني بهالموضوع: ';
+const briefDlg = document.getElementById('briefDlg'), briefText = document.getElementById('briefText');
+function cleanBrief(t){   // يحذف سطور القالب اللي بقت فارغة
+  return t.split('\n').filter(l => !/^\s*[^:\n]{1,40}:\s*$/.test(l)).join('\n').trim();
+}
+function updateBriefUI(){ document.getElementById('briefBtn').classList.toggle('has', !!(currentId && (ctxRec().brief || '').trim())); }
+function renderBriefFiles(){
+  document.getElementById('briefFiles').textContent = pending.length ? '📎 مرفق: ' + pending.map(a => a.name).join('، ') : '';
+}
+function openBrief(){
+  if (busy) return;
+  briefText.value = ctxRec().brief || BRIEF_TPL;
+  renderBriefFiles(); briefDlg.showModal();
+}
+function saveBrief(){
+  const rec = ctxRec(), t = cleanBrief(briefText.value);
+  if ((rec.brief || '') !== t){ if (t) rec.brief = t; else delete rec.brief; ctxSave(rec); }
+  updateBriefUI();
+}
+document.getElementById('briefBtn').onclick = openBrief;
+document.getElementById('briefAttach').onclick = () => fileInput.click();
+document.getElementById('briefSave').onclick = () => { saveBrief(); briefDlg.close(); };
+document.getElementById('briefClose').onclick = () => briefDlg.close();
+document.getElementById('briefStart').onclick = () => {
+  saveBrief(); briefDlg.close();
+  if (!(ctxRec().brief || '') && !pending.length) return;
+  input.value = pending.length ? 'راجعوا الملف المرفق حسب موجز المحادثة.' : 'ابدأوا حسب موجز المحادثة.';
+  send();
+};
 function setSendState(){
   sendBtn.textContent = busy ? '■' : '↑';
   sendBtn.classList.toggle('stop', busy);
@@ -1936,6 +1990,7 @@ fileInput.onchange = async () => {
   }
   fileInput.value = '';
   renderPending();
+  if (briefDlg.open) renderBriefFiles();
 };
 function renderPending(){
   pendingEl.innerHTML = '';
@@ -2092,11 +2147,12 @@ function openChat(id){
 document.getElementById('newChat').onclick = () => {
   if (busy) return;
   const empty = chats.find(c => !store.get('majlis_chat_' + c.id, []).length);
-  if (empty) return openChat(empty.id);
+  if (empty){ openChat(empty.id); return openBrief(); }
   const id = 'c' + Date.now();
   chats.unshift({ id, title:'محادثة جديدة', updated:Date.now() });
   store.set('majlis_chat_' + id, []);
   openChat(id);
+  openBrief();   // الموجز اختياري: «إغلاق» يتجاوزه
 };
 function renderChatList(){
   chatList.innerHTML = '';
