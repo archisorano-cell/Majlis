@@ -289,6 +289,9 @@
   <div class="hint">اكتب اللي تريده من هاي المحادثة. ينرسل ويا كل رسالة، والقص والخلاصات ما يمسونه. اترك أي سطر فارغ إذا ما تحتاجه.</div>
   <textarea id="briefText"></textarea>
   <div id="briefFiles"></div>
+  <div class="field"><label>مدة كاش Claude لهاي المحادثة</label>
+    <select id="briefTTL"><option value="5m">5 دقايق (الافتراضي)</option><option value="1h">ساعة</option></select>
+    <div class="hint">ساعة: أول حفظ أغلى (ضعف سعر القراءة بدل ربع زيادة)، بس ما ينمسح لو سكتت تقرا أو تفكر لحد ساعة. مناسب للعقود والملفات الطويلة.</div></div>
   <div class="btns">
     <button class="btn" id="briefAttach">📎 إرفاق ملف</button>
     <button class="btn" id="briefSave">حفظ</button>
@@ -784,10 +787,11 @@ function estimateUsd(modelId, inTok, outTok){
   return pr ? (inTok || 0) * pr.i + (outTok || 0) * pr.o : null;
 }
 /* تكلفة Claude: الدخول العادي + كتابة الكاش + قراءة الكاش كل واحد بسعره، والخروج */
-function claudeUsd(inBase, cacheWrite, cacheRead, outTok){
+function claudeUsd(inBase, cacheWrite, cacheRead, outTok, cw1h){
   const pr = priceFor('anthropic/' + claudeModelNow()); if (!pr) return null;
   const cw = pr.cw != null ? pr.cw : pr.i, cr = pr.cr != null ? pr.cr : pr.i;   // إذا لم تنشر OpenRouter سعر الكاش نستعمل سعر الدخول
-  return (inBase || 0) * pr.i + (cacheWrite || 0) * cw + (cacheRead || 0) * cr + (outTok || 0) * pr.o;
+  const h = Math.min(cw1h || 0, cacheWrite || 0);   // كتابة كاش الساعة تُحسب بضعف سعر الدخول
+  return (inBase || 0) * pr.i + ((cacheWrite || 0) - h) * cw + h * pr.i * 2 + (cacheRead || 0) * cr + (outTok || 0) * pr.o;
 }
 function addSpend(kind, usd){
   if (!usd || !isFinite(usd)) return;
@@ -815,14 +819,16 @@ function claudeBody(turns, system){
   const body = { model:claudeModelNow(), max_tokens: inCall ? 500 : 16000, system: parts.join('\n\n'), stream: true, messages };
   if (S.cacheOn){
     // كل جزء كتلة مستقلة، ونقطة الكاش على آخرها (التعليمات + الأوامر الدائمة + الخلاصات ثابتة بين الطلبات)
+    // مدة الكاش لكل محادثة: 5 دقايق (الافتراضي) أو ساعة. نفس المدة لكل النقاط حتى لا يتعارض الترتيب
+    const cc = () => ctxRec().cacheTTL === '1h' ? { type:'ephemeral', ttl:'1h' } : { type:'ephemeral' };
     body.system = parts.map(x => ({ type:'text', text: x }));
-    body.system[body.system.length - 1].cache_control = { type:'ephemeral' };
+    body.system[body.system.length - 1].cache_control = cc();
     let k = -1;
     for (let i = messages.length - 2; i >= 0; i--) if (messages[i].role === 'assistant'){ k = i; break; }
     if (k >= 0){
       const m = messages[k];
       if (typeof m.content === 'string') m.content = [{ type:'text', text: m.content }];
-      m.content[m.content.length - 1].cache_control = { type:'ephemeral' };
+      m.content[m.content.length - 1].cache_control = cc();
     }
   }
   return body;
@@ -840,13 +846,14 @@ async function callClaude(turns, system, onDelta){
     throw new Error('Claude: ' + (d.error && d.error.message || r.status));
   }
   liveUsage.respOk = true;
-  let text = '', inTok = 0, outTok = 0, inBase = 0, cw = 0, cr = 0;
+  let text = '', inTok = 0, outTok = 0, inBase = 0, cw = 0, cr = 0, cw1h = 0;
   await readSSE(r, ev => {
     if (ev.type === 'message_start' && ev.message && ev.message.usage){
       const u = ev.message.usage;
       inBase = u.input_tokens || 0; cw = u.cache_creation_input_tokens || 0; cr = u.cache_read_input_tokens || 0;
+      cw1h = (u.cache_creation && u.cache_creation.ephemeral_1h_input_tokens) || 0;
       inTok = inBase + cw + cr;
-      Object.assign(liveUsage, { inBase, cw, cr, inKnown: true });
+      Object.assign(liveUsage, { inBase, cw, cr, cw1h, inKnown: true });
     }
     if (ev.type === 'message_delta' && ev.usage){ outTok = ev.usage.output_tokens || outTok; liveUsage.out = outTok; }
     if (ev.type === 'message_delta' && ev.delta && ev.delta.stop_reason === 'max_tokens') lastCut = true;
@@ -857,7 +864,7 @@ async function callClaude(turns, system, onDelta){
     }
   });
   // Anthropic ترجّع عدد التوكنز الفعلي، والسعر من قائمة OpenRouter (تقدير)
-  lastUsage = { inTok, outTok, usd: claudeUsd(inBase, cw, cr, outTok), est: true, cw, cr, inBase };
+  lastUsage = { inTok, outTok, usd: claudeUsd(inBase, cw, cr, outTok, cw1h), est: true, cw, cr, cw1h, inBase };
   return text.trim();
 }
 
@@ -921,6 +928,24 @@ async function geminiRequest(body, withConfig){
   throw new Error('Gemini: ' + lastErr);
 }
 
+function orBody(model, turns, system){
+  const messages = [{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
+    ? [ ...t.atts.map(a => a.mime === 'application/pdf'
+          ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
+          : { type:'image_url', image_url:{ url:`data:${a.mime};base64,${a.data}` } }),
+        { type:'text', text:t.text } ]
+    : t.text }))];
+  if (S.cacheOn && /^google\//.test(model)){
+    // كاش Gemini الصريح: نقطة على آخر رد سابق (كل ما قبله ثابت: التعليمات والموجز والملفات والرسائل القديمة).
+    // إذا ماكو رد سابق، على التعليمات. مدته 5 دقايق يحددها Google، والقراءة منه أرخص بكثير
+    let k = 0;
+    for (let i = messages.length - 2; i >= 1; i--) if (messages[i].role === 'assistant'){ k = i; break; }
+    const m = messages[k];
+    if (typeof m.content === 'string') m.content = [{ type:'text', text: m.content }];
+    m.content[m.content.length - 1].cache_control = { type:'ephemeral' };
+  }
+  return { model, max_tokens: inCall ? 800 : 16000, reasoning:{ effort:'low' }, stream: true, usage:{ include: true }, messages };
+}
 async function callOpenRouter(turns, system, onDelta){
   // في المكالمة نستعمل Flash السريع بدل Pro حتى لا يطول الانتظار
   const model = orModelNow();
@@ -929,13 +954,7 @@ async function callOpenRouter(turns, system, onDelta){
     method:'POST', signal: aborter ? aborter.signal : undefined,
     headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + S.orKey,
       'X-Title':'Majlis' },
-    body: JSON.stringify({ model, max_tokens: inCall ? 800 : 16000, reasoning:{ effort:'low' }, stream: true, usage:{ include: true },
-      messages:[{ role:'system', content:system }, ...turns.map(t => ({ role:t.role, content: t.atts && t.atts.length
-        ? [ ...t.atts.map(a => a.mime === 'application/pdf'
-              ? { type:'file', file:{ filename:a.name, file_data:`data:${a.mime};base64,${a.data}` } }
-              : { type:'image_url', image_url:{ url:`data:${a.mime};base64,${a.data}` } }),
-            { type:'text', text:t.text } ]
-        : t.text }))] })
+    body: JSON.stringify(orBody(model, turns, system))
   });
   if (!r.ok){
     const d = await r.json().catch(() => ({}));
@@ -1056,7 +1075,8 @@ function cacheInfo(who, u){
   if (pr){
     const crP = pr.cr != null ? pr.cr : null, cwP = pr.cw != null ? pr.cw : null;
     // الفرق = (سعرها لو كانت دخولاً عادياً) - (سعرها الفعلي بالكاش). موجب = توفير
-    if (crP != null || cwP != null) diff = cr * (pr.i - (crP != null ? crP : pr.i)) + cw * (pr.i - (cwP != null ? cwP : pr.i));
+    const h = Math.min(u.cw1h || 0, cw);
+    if (crP != null || cwP != null) diff = cr * (pr.i - (crP != null ? crP : pr.i)) + (cw - h) * (pr.i - (cwP != null ? cwP : pr.i)) - h * pr.i;
   }
   return { st, diff, trim: !!(moved && st !== 'read') };
 }
@@ -1212,7 +1232,7 @@ function interruptedCost(who, e, promptChars, attCount, partialText){
   const outTok = liveUsage.out || Math.ceil(partialText.length / 2.5);
   let usd;
   if (who === 'claude'){
-    usd = liveUsage.inKnown ? claudeUsd(liveUsage.inBase, liveUsage.cw, liveUsage.cr, outTok) : claudeUsd(estIn, 0, 0, outTok);
+    usd = liveUsage.inKnown ? claudeUsd(liveUsage.inBase, liveUsage.cw, liveUsage.cr, outTok, liveUsage.cw1h) : claudeUsd(estIn, 0, 0, outTok);
   } else {
     usd = estimateUsd(liveUsage.model || orModelNow(), estIn, outTok);
   }
@@ -1518,11 +1538,15 @@ function renderBriefFiles(){
 function openBrief(){
   if (busy) return;
   briefText.value = ctxRec().brief || BRIEF_TPL;
+  document.getElementById('briefTTL').value = ctxRec().cacheTTL === '1h' ? '1h' : '5m';
   renderBriefFiles(); briefDlg.showModal();
 }
 function saveBrief(){
-  const rec = ctxRec(), t = cleanBrief(briefText.value);
-  if ((rec.brief || '') !== t){ if (t) rec.brief = t; else delete rec.brief; ctxSave(rec); }
+  const rec = ctxRec(), t = cleanBrief(briefText.value), ttl = document.getElementById('briefTTL').value;
+  let ch = false;
+  if ((rec.brief || '') !== t){ if (t) rec.brief = t; else delete rec.brief; ch = true; }
+  if ((rec.cacheTTL || '5m') !== ttl){ if (ttl === '1h') rec.cacheTTL = '1h'; else delete rec.cacheTTL; ch = true; }   // حقل اختياري
+  if (ch) ctxSave(rec);
   updateBriefUI();
 }
 document.getElementById('briefBtn').onclick = openBrief;
